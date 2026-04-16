@@ -32,9 +32,8 @@ print("Using data file:", data_path)
 df = pd.read_csv(data_path, index_col=False)
 eagle = pv.read(DEFAULT_MODEL)
 
-center = eagle.center
-eagle.translate((-center[0], -center[1], -center[2]), inplace=True)
-eagle.scale([0.1, 0.1, 0.1], inplace=True)
+
+eagle.scale([1, 1, 1], inplace=True)
 
 def parse_angle_series(cell):
     if pd.isna(cell):
