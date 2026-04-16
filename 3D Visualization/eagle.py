@@ -15,9 +15,11 @@ plotter.enable_trackball_style()
 floor = pv.Plane(center=(0, 0, 0), direction=(0, 0, 1), i_size=10, j_size=10)
 plotter.add_mesh(floor, opacity=0.5)
 
-bird = pv.Cube(center=(0, 0, 1), x_length=1.5, y_length=0.4, z_length=0.2)
+#bird = pv.Cube(center=(0, 0, 1), x_length=1.5, y_length=0.4, z_length=0.2)
+eagle = pv.read("3D Visualization/18741_Eagle_with_talons_spread_v1.obj")
 
-bird_actor = plotter.add_mesh(bird, show_edges=True)
+#bird_actor = plotter.add_mesh(bird, show_edges=True)
+eagle_actor = plotter.add_mesh(eagle, color="white")
 
 text_actor = plotter.add_text("", position="upper_left", font_size=12)
 plotter.show(auto_close=False, interactive_update=True)
@@ -32,7 +34,7 @@ for sec_idx, (_, row) in enumerate(df.iterrows()):
         continue
 
     for i in range(n):
-        bird_actor.SetOrientation(rolls[i], pitchs[i], yaws[i])
+        eagle_actor.SetOrientation(rolls[i], pitchs[i], yaws[i])
 
         current_time = sec_idx + i / max(n, 1)
         legend_text = (
@@ -45,8 +47,7 @@ for sec_idx, (_, row) in enumerate(df.iterrows()):
         plotter.update()
         time.sleep(0.05)
 
-#plotter.show()
-#
+
 """
 for i in range(len(df)):
     print(i, flush=True)
