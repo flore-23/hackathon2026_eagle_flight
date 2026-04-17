@@ -19,6 +19,7 @@
     }
 
     header {
+      position: relative;
       min-height: 100vh;
       display: flex;
       flex-direction: column;
@@ -27,7 +28,7 @@
       padding: 40px 20px;
       text-align: center;
       background: url("background.jpg") center/cover no-repeat;
-  }
+    }
 
     header h1 {
       font-size: 3rem;
@@ -49,6 +50,22 @@
       text-decoration: none;
       font-weight: bold;
       border-radius: 10px;
+    }
+
+    .scroll-arrow {
+      position: absolute;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 4rem;
+      color: white;
+      opacity: 0.9;
+      animation: bounce 1.5s infinite;
+    }
+
+    @keyframes bounce {
+      0%, 100% { transform: translate(-50%, 0); }
+      50% { transform: translate(-50%, 12px); }
     }
 
     section {
@@ -104,102 +121,87 @@
       3D reconstruction, trajectory analysis, and visual storytelling.
     </p>
     <a class="button" href="https://github.com/flore-23/hackathon2026_eagle_flight" target="_blank">View Repository</a>
-    .scroll-arrow {
-      position: absolute;
-      bottom: 30px;
-
-      left: 50%;                 
-      transform: translateX(-50%);
-
-      font-size: 4rem;           
-      color: white;
-
-      opacity: 0.9;
-      animation: bounce 1.5s infinite;
-    }
+    <div class="scroll-arrow">↓</div>
   </header>
 
   <section>
-  <h2>Project Overview</h2>
-  <p>
-    We transform high-resolution bio-logging data into a dynamic 3D visualization 
-    of golden eagle flight. By combining GPS, accelerometer, gyroscope, and 
-    magnetometer data, we reconstruct real flight trajectories and body orientation.
-  </p>
-  <p>
-    The result is an interactive system that maps pitch, roll, and yaw onto a 
-    3D eagle model, enabling a deeper understanding of flight dynamics and 
-    animal behavior.
-  </p>
-</section>
+    <h2>Project Overview</h2>
+    <p>
+      We transform high-resolution bio-logging data into a dynamic 3D visualization 
+      of golden eagle flight. By combining GPS, accelerometer, gyroscope, and 
+      magnetometer data, we reconstruct real flight trajectories and body orientation.
+    </p>
+    <p>
+      The result is an interactive system that maps pitch, roll, and yaw onto a 
+      3D eagle model, enabling a deeper understanding of flight dynamics and 
+      animal behavior.
+    </p>
+  </section>
 
   <section>
     <h2>Golden Eagle Photos</h2>
     <div class="grid images">
-      <img src="image1.jpeg">
-      <img src="photo1.jpg">
-      <img src="photo2.jpg">
+      <img src="image1.jpeg" alt="Golden eagle photo 1">
+      <img src="photo1.jpg" alt="Golden eagle photo 2">
+      <img src="photo2.jpg" alt="Golden eagle photo 3">
     </div>
   </section>
+
   <section>
     <h2>Data Plots</h2>
-
     <p style="text-align:center; max-width:700px; margin:auto; margin-bottom:20px;">
-       This plot shows the recorded altitude and IMU-based orientation (pitch, roll, yaw)
+      This plot shows the recorded altitude and IMU-based orientation (pitch, roll, yaw)
       of the eagle over time during a soaring flight segment.
     </p>
-
     <div style="text-align:center;">
       <img src="imu_plot.png" alt="IMU plot" style="max-width:100%; border-radius:10px;">
     </div>
   </section>
+
   <section>
-  <h2>Pipeline</h2>
+    <h2>Pipeline</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Data Acquisition</h3>
+        <p>
+          High-resolution bio-logging data is collected from GPS, accelerometer,
+          gyroscope, and magnetometer sensors.
+        </p>
+      </div>
 
-  <div class="grid">
+      <div class="card">
+        <h3>Data Processing</h3>
+        <p>
+          Raw sensor data is cleaned, synchronized, and transformed to extract
+          orientation information.
+        </p>
+      </div>
 
-    <div class="card">
-      <h3>Data Acquisition</h3>
-      <p>
-        High-resolution bio-logging data is collected from GPS, accelerometer,
-        gyroscope, and magnetometer sensors.
-      </p>
+      <div class="card">
+        <h3>Orientation Reconstruction</h3>
+        <p>
+          Pitch, roll, and yaw are computed to reconstruct the eagle’s body
+          orientation over time.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>3D Visualization</h3>
+        <p>
+          The reconstructed motion is mapped onto a 3D eagle model to generate
+          an intuitive and dynamic flight visualization.
+        </p>
+      </div>
     </div>
+  </section>
 
-    <div class="card">
-      <h3>Data Processing</h3>
-      <p>
-        Raw sensor data is cleaned, synchronized, and transformed to extract
-        orientation information.
-      </p>
-    </div>
+  <section>
+    <h2>Simulation Preview</h2>
+    <p style="text-align:center;">
+      Visualization of reconstructed eagle motion (preview).
+    </p>
+  </section>
 
-    <div class="card">
-      <h3>Orientation Reconstruction</h3>
-      <p>
-        Pitch, roll, and yaw are computed to reconstruct the eagle’s body
-        orientation over time.
-      </p>
-    </div>
-
-    <div class="card">
-      <h3>3D Visualization</h3>
-      <p>
-        The reconstructed motion is mapped onto a 3D eagle model to generate
-        an intuitive and dynamic flight visualization.
-      </p>
-    </div>
-
-  </div>
-</section>
-<section>
-  <h2>Simulation Preview</h2>
-  <p style="text-align:center;">
-    Visualization of reconstructed eagle motion (preview).
-  </p>
-</section>
-  
-  
   <footer>
     Golden Eagle Flight Visualization
   </footer>
