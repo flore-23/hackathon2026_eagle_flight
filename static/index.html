@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Eagle Flight Visualizer</title>
+
+  <!-- CesiumJS -->
+  <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.125/Build/Cesium/Widgets/widgets.css" />
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.125/Build/Cesium/Cesium.js"></script>
+
+  <!-- Leaflet (right-pane 2D map) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ============================================================ -->
+<!--  UPLOAD OVERLAY                                              -->
+<!-- ============================================================ -->
+<div id="upload-overlay">
+  <div id="upload-box">
+    <h1>Eagle Flight Visualizer</h1>
+    <p>Upload GPS and 3D orientation CSV files to begin.</p>
+    <div class="upload-fields">
+      <label>GPS CSV<input type="file" id="gps-file" accept=".csv" /></label>
+      <label>Orientation CSV<input type="file" id="orient-file" accept=".csv" /></label>
+    </div>
+    <button id="upload-btn" disabled>Load Flight</button>
+    <div id="upload-divider">— or —</div>
+    <button id="demo-btn">Load Demo Data</button>
+    <div id="upload-status"></div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!--  MAIN APP                                                    -->
+<!-- ============================================================ -->
+<div id="app" class="hidden">
+
+  <!-- HUD -->
+  <div id="hud">
+    <span id="hud-speed">Speed: — m/s</span>
+    <span id="hud-sep">|</span>
+    <span id="hud-alt">Altitude: — m</span>
+  </div>
+
+  <!-- Split panes -->
+  <div id="viewer-container">
+
+    <!-- Left: 3D first-person eagle view -->
+    <div id="left-pane">
+      <div id="cesium-3d"></div>
+    </div>
+
+    <!-- Right: trajectory map (Leaflet 2D default / Cesium 3D toggle) -->
+    <div id="right-pane">
+      <div id="right-controls">
+        <button class="view-toggle active" data-mode="2d">2D Map</button>
+        <button class="view-toggle"        data-mode="3d">3D View</button>
+      </div>
+      <div id="leaflet-map"></div>
+      <div id="cesium-map" class="hidden"></div>
+    </div>
+
+  </div>
+
+  <!-- ============================================================ -->
+  <!--  TIMELINE BAR                                               -->
+  <!-- ============================================================ -->
+  <div id="timeline-bar">
+
+    <div id="tl-time-current">00:00:00</div>
+
+    <!-- Track: click or drag to seek -->
+    <div id="tl-track">
+      <!-- orange segments injected here by JS -->
+      <div id="tl-scrubber"></div>
+    </div>
+
+    <div id="tl-time-end">00:00:00</div>
+
+    <!-- Playback controls -->
+    <div id="playback-controls">
+      <button id="play-btn" title="Play / Pause">&#9654;</button>
+      <label>
+        <select id="speed-select" title="Playback speed">
+          <option value="1">1×</option>
+          <option value="5">5×</option>
+          <option value="10" selected>10×</option>
+          <option value="30">30×</option>
+          <option value="60">60×</option>
+          <option value="300">300×</option>
+        </select>
+      </label>
+    </div>
+
+  </div>
+
+</div>
+
+<script src="/config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
