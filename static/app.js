@@ -15,9 +15,9 @@ const CESIUM_ION_TOKEN = window.CESIUM_ION_TOKEN || "";
 const HAS_ION = CESIUM_ION_TOKEN.length > 0;
 if (HAS_ION) Cesium.Ion.defaultAccessToken = CESIUM_ION_TOKEN;
 
-/* camera offset behind/above eagle (metres in entity body frame) */
-const CAM_BACK = 150;
-const CAM_UP   = 40;
+/* Camera chase parameters */
+const CAM_RANGE = 200;    // metres from eagle
+const CAM_PITCH = -25;    // degrees (negative = looking down from behind)
 
 /* ------------------------------------------------------------------ */
 /*  State                                                              */
@@ -142,30 +142,39 @@ function buildOrientationProp(posProp, headProp, epoch) {
     interpolationAlgorithm: Cesium.LinearApproximation,
   });
 
-  const addSample = (tSec, pitchDeg, rollDeg) => {
-    const jt  = Cesium.JulianDate.addSeconds(epoch, tSec, new Cesium.JulianDate());
-    const pos = posProp.getValue(jt);
-    if (!pos) return;
-    const hDeg = headProp.getValue(jt) || 0;
-    const hpr  = new Cesium.HeadingPitchRoll(
-      Cesium.Math.toRadians(hDeg),
-      Cesium.Math.toRadians(pitchDeg),
-      Cesium.Math.toRadians(rollDeg)
-    );
-    prop.addSample(jt, Cesium.Transforms.headingPitchRollQuaternion(pos, hpr));
-  };
+  /* Collect ALL keyframes first, then sort by time.
+     SampledProperty.addSample() expects chronological order — adding
+     GPS-only frames then orientation frames would leave them interleaved
+     and break the binary-search interpolation. */
+  const keyframes = [];
 
-  // 1. GPS-only keyframes → level flight
+  // GPS-only keyframes → level flight (pitch=0, roll=0)
   const pos = flightData.positions;
   for (let i = 0; i < pos.length; i += 4) {
     const t = pos[i];
-    if (!hasOrientationAt(t)) addSample(t, 0, 0);
+    if (!hasOrientationAt(t)) keyframes.push({ t, pitch: 0, roll: 0 });
   }
 
-  // 2. Orientation keyframes → real body attitude
+  // Orientation keyframes → real body attitude
   const { times, pitch, roll } = flightData.orientations;
   for (let i = 0; i < times.length; i++) {
-    addSample(times[i], pitch[i], roll[i]);
+    keyframes.push({ t: times[i], pitch: pitch[i], roll: roll[i] });
+  }
+
+  // Sort chronologically before adding
+  keyframes.sort((a, b) => a.t - b.t);
+
+  for (const kf of keyframes) {
+    const jt  = Cesium.JulianDate.addSeconds(epoch, kf.t, new Cesium.JulianDate());
+    const p   = posProp.getValue(jt);
+    if (!p) continue;
+    const hDeg = headProp.getValue(jt) || 0;
+    const hpr  = new Cesium.HeadingPitchRoll(
+      Cesium.Math.toRadians(hDeg),
+      Cesium.Math.toRadians(kf.pitch),
+      Cesium.Math.toRadians(kf.roll)
+    );
+    prop.addSample(jt, Cesium.Transforms.headingPitchRollQuaternion(p, hpr));
   }
 
   return prop;
@@ -220,7 +229,7 @@ function addEagleEntity() {
     },
     path: {
       leadTime:  0,
-      trailTime: 180,
+      trailTime: totalSec,   // full trajectory trail
       width: 2,
       material: new Cesium.PolylineGlowMaterialProperty({
         glowPower: 0.25,
@@ -236,17 +245,20 @@ function addEagleEntity() {
 /* ------------------------------------------------------------------ */
 function updateCamera(time) {
   const pos = eagleEntity.position.getValue(time, new Cesium.Cartesian3());
-  const ori = eagleEntity.orientation.getValue(time, new Cesium.Quaternion());
-  if (!pos || !ori) return;
+  if (!pos) return;
 
-  /* Rotate the "behind and up" vector from body frame → world frame */
-  const rotMat = Cesium.Matrix3.fromQuaternion(ori, new Cesium.Matrix3());
-  // Body frame: X = right, Y = forward, Z = up  →  offset = back + up
-  const offsetBody = new Cesium.Cartesian3(0, -CAM_BACK, CAM_UP);
-  const offsetWorld = Cesium.Matrix3.multiplyByVector(rotMat, offsetBody, new Cesium.Cartesian3());
+  const hDeg = headingSampled ? headingSampled.getValue(time) : null;
+  if (hDeg == null) return;
 
-  /* lookAt(target, offset): camera placed at target+offset, looking at target */
-  viewer3D.camera.lookAt(pos, offsetWorld);
+  /* HeadingPitchRange works in the local ENU frame at target — no
+     reference-frame conversion needed, so the view stays stable.
+     heading = eagle's heading → camera is directly behind
+     pitch   = negative       → camera looks down from above         */
+  viewer3D.camera.lookAt(pos, new Cesium.HeadingPitchRange(
+    Cesium.Math.toRadians(hDeg),
+    Cesium.Math.toRadians(CAM_PITCH),
+    CAM_RANGE
+  ));
 }
 
 /* ------------------------------------------------------------------ */
@@ -561,19 +573,14 @@ async function startApp() {
   viewer3D.clock.stopTime     = stopJD.clone();
   viewer3D.clock.currentTime  = startJD.clone();
   viewer3D.clock.clockRange   = Cesium.ClockRange.LOOP_STOP;
-  viewer3D.clock.multiplier   = 10;
+  viewer3D.clock.multiplier   = 1;
   viewer3D.clock.shouldAnimate = false;
+
+  /* Compute total duration (needed for trail length) */
+  totalSec = Cesium.JulianDate.secondsDifference(stopJD, startJD);
 
   /* Eagle */
   addEagleEntity();
-
-  /* Jump to first orientation interval so eagle is visible from start */
-  if (flightData.orientation_intervals.length > 0) {
-    const firstT = flightData.orientation_intervals[0][0];
-    viewer3D.clock.currentTime = Cesium.JulianDate.addSeconds(
-      epochJulian, firstT, new Cesium.JulianDate()
-    );
-  }
 
   /* Leaflet 2D map */
   initLeafletMap();
