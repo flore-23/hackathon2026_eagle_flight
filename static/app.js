@@ -36,6 +36,8 @@ let headingSampled  = null;
 let epochJulian     = null;
 let totalSec        = 0;
 let tlTracking      = true;   // timeline scrubber follows clock
+let leafletPastPath = null;
+let leafletAllPts = [];
 
 /* ------------------------------------------------------------------ */
 /*  Upload / demo                                                      */
@@ -319,45 +321,41 @@ function initLeafletMap() {
     attribution: "© OpenStreetMap contributors",
   }).addTo(lmap);
 
-  /* Build coloured trajectory segments */
   const positions = flightData.positions;
   const pts = [];
+
   for (let i = 0; i < positions.length; i += 4) {
-    pts.push({ t: positions[i], lat: positions[i+2], lng: positions[i+1] });
-  }
-
-  let segStart = 0;
-  let curHasOrient = hasOrientationAt(pts[0].t);
-
-  const addLeafletSegment = (from, to, hasOrient) => {
-    const latLngs = pts.slice(from, to + 1).map(p => [p.lat, p.lng]);
-    if (latLngs.length < 2) return;
-    const pl = L.polyline(latLngs, {
-      color:   hasOrient ? "#e67e22" : "#888",
-      weight:  hasOrient ? 3 : 2,
-      opacity: hasOrient ? 0.9 : 0.5,
-    }).addTo(lmap);
-    /* store points for click-to-jump */
-    leafletPolylines.push({ polyline: pl, pts: pts.slice(from, to + 1) });
-    pl.on("click", (e) => {
-      jumpToNearestPoint(e.latlng.lat, e.latlng.lng);
+    pts.push({
+      t: positions[i],
+      lat: positions[i + 2],
+      lng: positions[i + 1],
     });
-  };
-
-  for (let i = 1; i < pts.length; i++) {
-    const ho = hasOrientationAt(pts[i].t);
-    if (ho !== curHasOrient) {
-      addLeafletSegment(segStart, i, curHasOrient);
-      segStart = i;
-      curHasOrient = ho;
-    }
   }
-  addLeafletSegment(segStart, pts.length - 1, curHasOrient);
 
-  /* Moving position marker */
+  leafletAllPts = pts;
+
+  /* All route: */
+  const fullLatLngs = pts.map(p => [p.lat, p.lng]);
+  L.polyline(fullLatLngs, {
+    color: "#fc9c9c",
+    weight: 2,
+    opacity: 0.6,
+  }).addTo(lmap);
+
+  /* Passed route: */
+  leafletPastPath = L.polyline([[pts[0].lat, pts[0].lng]], {
+    color: "#ef3737",
+    weight: 2,
+    opacity: 0.6,
+  }).addTo(lmap);
+
+  /* Moving marker */
   leafletMarker = L.circleMarker([pts[0].lat, pts[0].lng], {
-    radius: 7, color: "#fff", fillColor: "#e74c3c",
-    fillOpacity: 1, weight: 2,
+    radius: 7,
+    color: "#fff",
+    fillColor: "#e74c3c",
+    fillOpacity: 1,
+    weight: 2,
   }).addTo(lmap);
 
   /* Click anywhere on map background to jump */
@@ -377,29 +375,52 @@ function initLeafletMap() {
 function jumpToNearestPoint(lat, lng) {
   /* Find closest trajectory point and jump clock to its timestamp */
   const positions = flightData.positions;
-  let bestDist = Infinity, bestT = 0;
+  let bestDist = Infinity;
+  let bestT = 0;
+
   for (let i = 0; i < positions.length; i += 4) {
-    const dLat = positions[i+2] - lat;
-    const dLng = positions[i+1] - lng;
+    const dLat = positions[i + 2] - lat;
+    const dLng = positions[i + 1] - lng;
     const d = dLat * dLat + dLng * dLng;
-    if (d < bestDist) { bestDist = d; bestT = positions[i]; }
+
+    if (d < bestDist) {
+      bestDist = d;
+      bestT = positions[i];
+    }
   }
-  const jt = Cesium.JulianDate.addSeconds(epochJulian, bestT, new Cesium.JulianDate());
+
+  const jt = Cesium.JulianDate.addSeconds(
+    epochJulian,
+    bestT,
+    new Cesium.JulianDate()
+  );
+
   viewer3D.clock.currentTime = jt;
   viewer3D.clock.shouldAnimate = false;
   document.getElementById("play-btn").innerHTML = "&#9654;";
 }
 
 function updateLeafletMarker(time) {
-  if (!lmap || !leafletMarker) return;
+  if (!lmap || !leafletMarker || !leafletPastPath || !leafletAllPts.length) return;
+
   const pos = eagleEntity.position.getValue(time, new Cesium.Cartesian3());
   if (!pos) return;
+
   const carto = Cesium.Cartographic.fromCartesian(pos);
   const lat = Cesium.Math.toDegrees(carto.latitude);
   const lng = Cesium.Math.toDegrees(carto.longitude);
-  leafletMarker.setLatLng([lat, lng]);
-}
 
+  leafletMarker.setLatLng([lat, lng]);
+
+  const currentT = Cesium.JulianDate.secondsDifference(time, epochJulian);
+
+  const pastPts = leafletAllPts.filter(p => p.t <= currentT);
+
+  const latLngs = pastPts.map(p => [p.lat, p.lng]);
+  latLngs.push([lat, lng]);
+
+  leafletPastPath.setLatLngs(latLngs);
+}
 /* ------------------------------------------------------------------ */
 /*  Lazy Cesium 3D map (right pane "3D" toggle)                        */
 /* ------------------------------------------------------------------ */
