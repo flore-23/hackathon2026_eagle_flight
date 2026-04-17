@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Golden Eagle Flight Visualization</title>
+
   <style>
     * {
       box-sizing: border-box;
@@ -52,6 +53,7 @@
       border-radius: 10px;
     }
 
+    /* SCROLL ARROW */
     .scroll-arrow {
       position: absolute;
       bottom: 30px;
@@ -94,15 +96,33 @@
       box-shadow: 0 4px 18px rgba(0,0,0,0.25);
     }
 
-    .card h3 {
-      margin-bottom: 10px;
-      color: #ffffff;
-    }
-
     .images img {
       width: 100%;
       border-radius: 14px;
       display: block;
+    }
+
+    /* TEAM */
+    .team {
+      display: flex;
+      justify-content: center;
+      gap: 40px;
+      margin-top: 30px;
+      flex-wrap: wrap;
+      text-align: center;
+    }
+
+    .member img {
+      width: 120px;
+      height: 120px;
+      object-fit: cover;
+      border-radius: 50%;
+      margin-bottom: 10px;
+      border: 3px solid #d4af37;
+    }
+
+    .member p {
+      font-size: 0.95rem;
     }
 
     footer {
@@ -112,18 +132,24 @@
     }
   </style>
 </head>
+
 <body>
 
+  <!-- HERO -->
   <header>
     <h1>Golden Eagle Flight Visualization</h1>
     <p>
       A data-driven visualization project exploring eagle flight motion through
       3D reconstruction, trajectory analysis, and visual storytelling.
     </p>
-    <a class="button" href="https://github.com/flore-23/hackathon2026_eagle_flight" target="_blank">View Repository</a>
+    <a class="button" href="https://github.com/flore-23/hackathon2026_eagle_flight" target="_blank">
+      View Repository
+    </a>
+
     <div class="scroll-arrow">↓</div>
   </header>
 
+  <!-- OVERVIEW -->
   <section>
     <h2>Project Overview</h2>
     <p>
@@ -138,63 +164,56 @@
     </p>
   </section>
 
+  <!-- PHOTOS -->
   <section>
     <h2>Golden Eagle Photos</h2>
     <div class="grid images">
-      <img src="image1.jpeg" alt="Golden eagle photo 1">
-      <img src="photo1.jpg" alt="Golden eagle photo 2">
-      <img src="photo2.jpg" alt="Golden eagle photo 3">
+      <img src="image1.jpeg">
+      <img src="photo1.jpg">
+      <img src="photo2.jpg">
     </div>
   </section>
 
+  <!-- PLOTS -->
   <section>
     <h2>Data Plots</h2>
     <p style="text-align:center; max-width:700px; margin:auto; margin-bottom:20px;">
       This plot shows the recorded altitude and IMU-based orientation (pitch, roll, yaw)
       of the eagle over time during a soaring flight segment.
     </p>
+
     <div style="text-align:center;">
-      <img src="imu_plot.png" alt="IMU plot" style="max-width:100%; border-radius:10px;">
+      <img src="imu_plot.png" style="width:90vw; max-width:1200px; border-radius:10px;">
     </div>
   </section>
 
+  <!-- PIPELINE -->
   <section>
     <h2>Pipeline</h2>
     <div class="grid">
       <div class="card">
         <h3>Data Acquisition</h3>
-        <p>
-          High-resolution bio-logging data is collected from GPS, accelerometer,
-          gyroscope, and magnetometer sensors.
-        </p>
+        <p>Bio-logging data is collected from multiple onboard sensors.</p>
       </div>
 
       <div class="card">
-        <h3>Data Processing</h3>
-        <p>
-          Raw sensor data is cleaned, synchronized, and transformed to extract
-          orientation information.
-        </p>
+        <h3>Processing</h3>
+        <p>Raw data is cleaned and synchronized.</p>
       </div>
 
       <div class="card">
-        <h3>Orientation Reconstruction</h3>
-        <p>
-          Pitch, roll, and yaw are computed to reconstruct the eagle’s body
-          orientation over time.
-        </p>
+        <h3>Orientation</h3>
+        <p>Pitch, roll, and yaw are reconstructed over time.</p>
       </div>
 
       <div class="card">
-        <h3>3D Visualization</h3>
-        <p>
-          The reconstructed motion is mapped onto a 3D eagle model to generate
-          an intuitive and dynamic flight visualization.
-        </p>
+        <h3>Visualization</h3>
+        <p>Motion is mapped onto a 3D eagle model.</p>
       </div>
     </div>
   </section>
 
+  <!-- PREVIEW -->
   <section>
     <h2>Simulation Preview</h2>
     <p style="text-align:center;">
@@ -202,39 +221,41 @@
     </p>
   </section>
 
+  <!-- TEAM -->
+  <section>
+    <h2>Our Team</h2>
+
+    <div class="team">
+      <div class="member">
+        <img src="nehir.png">
+        <p>Nehir CAGLAR</p>
+      </div>
+
+      <div class="member">
+        <img src="duru.png">
+        <p>Duru OZ</p>
+      </div>
+
+      <div class="member">
+        <img src="lara.png">
+        <p>Lara BEKTAS</p>
+      </div>
+
+      <div class="member">
+        <img src="madhur.png">
+        <p>Madhur PANWAR</p>
+      </div>
+
+      <div class="member">
+        <img src="flore.png">
+        <p>Flore MICHEL</p>
+      </div>
+    </div>
+  </section>
+
   <footer>
     Golden Eagle Flight Visualization
   </footer>
-  <section>
-  <h2>Our Team</h2>
-
-  <div class="team">
-    <div class="member">
-      <img src="NEHİR.png">
-      <p>Nehir CAGLAR</p>
-    </div>
-
-    <div class="member">
-      <img src="duru.png">
-      <p>Duru OZ</p>
-    </div>
-
-    <div class="member">
-      <img src="lara.png">
-      <p>Lara BEKTAS</p>
-    </div>
-
-    <div class="member">
-      <img src="madhur.png">
-      <p>Madhur PANWAR</p>
-    </div>
-
-    <div class="member">
-      <img src="flore.png">
-      <p>Flore MICHEL</p>
-    </div>
-  </div>
-</section>
 
 </body>
 </html>
