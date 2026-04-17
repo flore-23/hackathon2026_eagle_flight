@@ -16,8 +16,8 @@ const HAS_ION = CESIUM_ION_TOKEN.length > 0;
 if (HAS_ION) Cesium.Ion.defaultAccessToken = CESIUM_ION_TOKEN;
 
 /* Camera chase parameters */
-const CAM_RANGE = 200;    // metres from eagle
-const CAM_PITCH = -25;    // degrees (negative = looking down from behind)
+const CAM_RANGE = 80;     // metres from eagle (closer = eagle fills more of screen)
+const CAM_PITCH = -20;    // degrees (negative = looking down from behind)
 
 /* ------------------------------------------------------------------ */
 /*  State                                                              */
@@ -142,33 +142,70 @@ function buildOrientationProp(posProp, headProp, epoch) {
     interpolationAlgorithm: Cesium.LinearApproximation,
   });
 
-  /* Collect ALL keyframes first, then sort by time.
-     SampledProperty.addSample() expects chronological order — adding
-     GPS-only frames then orientation frames would leave them interleaved
-     and break the binary-search interpolation. */
-  const keyframes = [];
+  /* ---- Physics-based roll for GPS-only keyframes ----------------------
+   *
+   * An eagle in a coordinated turn banks at:
+   *   bank = atan(v * ω / g)
+   * where ω = dHeading/dt (rad/s), v = airspeed (m/s), g = 9.81.
+   *
+   * Positive ω = clockwise (right turn) → positive roll = right wing down.
+   * This produces realistic banking in ALL sections, not just IMU sections.
+   * ------------------------------------------------------------------- */
+  const G = 9.81;
+  const MAX_BANK_DEG = 45;   // cap to avoid extreme values from GPS noise
 
-  // GPS-only keyframes → level flight (pitch=0, roll=0)
+  // Sample heading and speed at every GPS timestamp
   const pos = flightData.positions;
+  const gpsTimes = [], gpsHead = [], gpsSpd = [];
   for (let i = 0; i < pos.length; i += 4) {
-    const t = pos[i];
-    if (!hasOrientationAt(t)) keyframes.push({ t, pitch: 0, roll: 0 });
+    const t  = pos[i];
+    const jt = Cesium.JulianDate.addSeconds(epoch, t, new Cesium.JulianDate());
+    gpsTimes.push(t);
+    gpsHead.push(headProp.getValue(jt) ?? 0);
+    gpsSpd.push(speedSampled ? (speedSampled.getValue(jt) ?? 0) : 0);
   }
 
-  // Orientation keyframes → real body attitude
+  // Central-difference heading rate → bank angle at each GPS sample
+  const gpsRoll = gpsTimes.map((t, i) => {
+    if (i === 0 || i === gpsTimes.length - 1) return 0;
+    const dt = gpsTimes[i + 1] - gpsTimes[i - 1];
+    if (dt <= 0) return 0;
+    let dH = gpsHead[i + 1] - gpsHead[i - 1];
+    if (dH >  180) dH -= 360;   // wrap [-180, 180]
+    if (dH < -180) dH += 360;
+    const omega   = Cesium.Math.toRadians(dH) / dt;      // rad/s
+    const bankRad = Math.atan2(gpsSpd[i] * omega, G);    // physics
+    return Math.max(-MAX_BANK_DEG, Math.min(MAX_BANK_DEG,
+                    Cesium.Math.toDegrees(bankRad)));
+  });
+
+  /* ---- Collect ALL keyframes, sort chronologically, then add ----------
+   *
+   * SampledProperty.addSample() expects chronological order.
+   * Building GPS-only then IMU frames separately would interleave them
+   * and break the binary-search interpolation.
+   * ------------------------------------------------------------------- */
+  const keyframes = [];
+
+  // GPS-only keyframes → physics roll, level pitch
+  for (let i = 0; i < gpsTimes.length; i++) {
+    const t = gpsTimes[i];
+    if (!hasOrientationAt(t)) keyframes.push({ t, pitch: 0, roll: gpsRoll[i] });
+  }
+
+  // IMU keyframes → real body attitude from sensor
   const { times, pitch, roll } = flightData.orientations;
   for (let i = 0; i < times.length; i++) {
     keyframes.push({ t: times[i], pitch: pitch[i], roll: roll[i] });
   }
 
-  // Sort chronologically before adding
   keyframes.sort((a, b) => a.t - b.t);
 
   for (const kf of keyframes) {
     const jt  = Cesium.JulianDate.addSeconds(epoch, kf.t, new Cesium.JulianDate());
     const p   = posProp.getValue(jt);
     if (!p) continue;
-    const hDeg = headProp.getValue(jt) || 0;
+    const hDeg = headProp.getValue(jt) ?? 0;
     const hpr  = new Cesium.HeadingPitchRoll(
       Cesium.Math.toRadians(hDeg),
       Cesium.Math.toRadians(kf.pitch),
@@ -216,20 +253,30 @@ function init3DViewer() {
 /* ------------------------------------------------------------------ */
 /*  Eagle entity                                                       */
 /* ------------------------------------------------------------------ */
+/*
+ * Scale factor for the 3D model.
+ * The FBX was authored in centimetres (bounding box ~191 × 43 × 89 cm),
+ * so at glTF's native metre units the model would be 191 m wide.
+ * MODEL_SCALE = 0.05 → ~10 m wingspan — clearly visible from 200 m chase cam.
+ * Raise toward 0.01 for realistic ~2 m eagle size.
+ */
+const MODEL_SCALE = 0.1;
+
 function addEagleEntity() {
   eagleEntity = viewer3D.entities.add({
     name: flightData.bird_id,
     position:    positionProp,
     orientation: orientationProp,
-    point: {
-      pixelSize: 14,
-      color: Cesium.Color.ORANGE,
-      outlineColor: Cesium.Color.WHITE,
-      outlineWidth: 2,
+    model: {
+      uri:            "/models/animated_eagle/scene.gltf",
+      scale:          MODEL_SCALE,
+      minimumPixelSize: 32,       // never shrinks below 32 px when far away
+      maximumScale:   2000,       // cap to avoid huge size near camera
+      runAnimations:  false,      // static glide pose — no flapping yet
     },
     path: {
       leadTime:  0,
-      trailTime: totalSec,   // full trajectory trail
+      trailTime: totalSec,
       width: 2,
       material: new Cesium.PolylineGlowMaterialProperty({
         glowPower: 0.25,

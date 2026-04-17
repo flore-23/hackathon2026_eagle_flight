@@ -1,0 +1,11 @@
+Model Information:
+* title:	animated EAGLE
+* source:	https://sketchfab.com/3d-models/animated-eagle-8fb150270adb45aa9653e857f3fa351b
+* author:	Asim3d (https://sketchfab.com/Asim3d)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "animated EAGLE" (https://sketchfab.com/3d-models/animated-eagle-8fb150270adb45aa9653e857f3fa351b) by Asim3d (https://sketchfab.com/Asim3d) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
