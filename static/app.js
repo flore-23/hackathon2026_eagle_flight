@@ -1,6 +1,6 @@
 /*  app.js — Eagle Flight Visualizer
  *
- *  Left  : CesiumJS 3D globe, camera locked behind eagle, real terrain.
+ *  Left  : CesiumJS 3D globe, delayed chase camera behind eagle, real terrain.
  *  Right : Leaflet 2D map (default) or Cesium 3D view (toggle).
  *  Bottom: Custom HTML timeline with orange orientation-data markers.
  */
@@ -16,8 +16,144 @@ const HAS_ION = CESIUM_ION_TOKEN.length > 0;
 if (HAS_ION) Cesium.Ion.defaultAccessToken = CESIUM_ION_TOKEN;
 
 /* Camera chase parameters */
-const CAM_RANGE = 80;     // metres from eagle (closer = eagle fills more of screen)
-const CAM_PITCH = -20;    // degrees (negative = looking down from behind)
+const CAM_RANGE = 90;             // metres from eagle (closer = eagle fills more of screen)
+const CAM_PITCH = -20;            // degrees (negative = looking down from behind)
+const CAM_HEADING_LAG_SEC = 60;   // view turns one minute after the eagle turns
+const CAM_FOCUS_BEHIND_M = 25;    // focus slightly behind the eagle so turns are visible
+
+/*
+ * MODEL_HEADING_CORRECTION: constant offset (degrees) added to GPS heading
+ * before orienting the 3D model.  The Sketchfab eagle's visible beak is
+ * 270° counter-clockwise from Cesium's HPR forward axis after the glTF axis
+ * conversion, so adding 270° aligns the beak with the travel direction.
+ */
+const MODEL_HEADING_CORRECTION = 270;
+
+/*
+ * The glTF scene origin is well away from the visible bird.  This extra
+ * transform is applied after Eagle(0)'s baked transform and places the tail
+ * at the entity position, so Cesium's path emerges from the eagle instead
+ * of floating beside it.
+ */
+const EAGLE_MODEL_ANCHOR_NODE = "Eagle(0)";
+const EAGLE_MODEL_ANCHOR_TRANSLATION = new Cesium.Cartesian3(
+  99.999917,
+  90.688003,
+  -75.709188
+);
+
+/* ------------------------------------------------------------------ */
+/*  Geo helpers: bearing and speed from consecutive GPS positions       */
+/* ------------------------------------------------------------------ */
+
+/** Great-circle bearing from point 1 to point 2, degrees [0, 360). */
+function geoBearing(lat1, lon1, lat2, lon2) {
+  const R2D = 180 / Math.PI, D2R = Math.PI / 180;
+  const φ1 = lat1 * D2R, φ2 = lat2 * D2R, Δλ = (lon2 - lon1) * D2R;
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  return (Math.atan2(y, x) * R2D + 360) % 360;
+}
+
+/** Haversine distance in metres between two lat/lon points. */
+function geoDistM(lat1, lon1, lat2, lon2) {
+  const D2R = Math.PI / 180, R = 6371000;
+  const Δφ = (lat2 - lat1) * D2R, Δλ = (lon2 - lon1) * D2R;
+  const a = Math.sin(Δφ / 2) ** 2
+          + Math.cos(lat1 * D2R) * Math.cos(lat2 * D2R) * Math.sin(Δλ / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function unwrapHeadingDegrees(previous, next) {
+  if (previous == null) return next;
+  let unwrapped = next;
+  while (unwrapped - previous > 180) unwrapped -= 360;
+  while (unwrapped - previous < -180) unwrapped += 360;
+  return unwrapped;
+}
+
+function offsetCartesianMeters(position, headingDeg, forwardM, upM = 0) {
+  const headingRad = Cesium.Math.toRadians(headingDeg);
+  const eastM = Math.sin(headingRad) * forwardM;
+  const northM = Math.cos(headingRad) * forwardM;
+  const enu = Cesium.Transforms.eastNorthUpToFixedFrame(position);
+  const offset = Cesium.Matrix4.multiplyByPointAsVector(
+    enu,
+    new Cesium.Cartesian3(eastM, northM, upM),
+    new Cesium.Cartesian3()
+  );
+  return Cesium.Cartesian3.add(position, offset, new Cesium.Cartesian3());
+}
+
+/**
+ * Build a SampledProperty<Number> for HEADING (degrees) derived purely from
+ * consecutive GPS positions.  This is reliable even when the GPS heading
+ * column is zero or stale (e.g. 15-minute fix intervals).
+ */
+function buildHeadingFromPositions(positions, epoch) {
+  const prop = new Cesium.SampledProperty(Number);
+  prop.setInterpolationOptions({
+    interpolationDegree: 1,
+    interpolationAlgorithm: Cesium.LinearApproximation,
+  });
+  const n = positions.length;
+  let previous = null;
+  for (let i = 0; i < n; i += 4) {
+    const t   = positions[i];
+    const lon = positions[i + 1], lat = positions[i + 2];
+    let bearing;
+    if (i + 4 < n) {
+      bearing = geoBearing(lat, lon, positions[i + 6], positions[i + 5]);
+    } else if (i > 0) {
+      // last point: use reverse of segment from previous to this
+      bearing = geoBearing(positions[i - 2], positions[i - 3], lat, lon);
+    } else {
+      bearing = 0;
+    }
+    bearing = unwrapHeadingDegrees(previous, bearing);
+    previous = bearing;
+    prop.addSample(
+      Cesium.JulianDate.addSeconds(epoch, t, new Cesium.JulianDate()),
+      bearing
+    );
+  }
+  return prop;
+}
+
+/**
+ * Build a SampledProperty<Number> for SPEED (m/s) derived from consecutive
+ * GPS positions and the time delta between them.  This correctly handles
+ * sparse GPS fixes (e.g. 15 minutes apart) where the recorded speed column
+ * may be 0 or stale.
+ */
+function buildSpeedFromPositions(positions, epoch) {
+  const prop = new Cesium.SampledProperty(Number);
+  prop.setInterpolationOptions({
+    interpolationDegree: 1,
+    interpolationAlgorithm: Cesium.LinearApproximation,
+  });
+  const n = positions.length;
+  for (let i = 0; i < n; i += 4) {
+    const t   = positions[i];
+    const lon = positions[i + 1], lat = positions[i + 2];
+    let speed;
+    if (i + 4 < n) {
+      const dt = positions[i + 4] - t;
+      speed = dt > 0 ? geoDistM(lat, lon, positions[i + 6], positions[i + 5]) / dt : 0;
+    } else if (i > 0) {
+      // last point: copy speed from previous segment
+      const dt = t - positions[i - 4];
+      speed = dt > 0 ? geoDistM(positions[i - 2], positions[i - 3], lat, lon) / dt : 0;
+    } else {
+      speed = 0;
+    }
+    prop.addSample(
+      Cesium.JulianDate.addSeconds(epoch, t, new Cesium.JulianDate()),
+      speed
+    );
+  }
+  return prop;
+}
 
 /* ------------------------------------------------------------------ */
 /*  State                                                              */
@@ -209,7 +345,7 @@ function buildOrientationProp(posProp, headProp, epoch) {
     if (!p) continue;
     const hDeg = headProp.getValue(jt) ?? 0;
     const hpr  = new Cesium.HeadingPitchRoll(
-      Cesium.Math.toRadians(hDeg),
+      Cesium.Math.toRadians(hDeg + MODEL_HEADING_CORRECTION),
       Cesium.Math.toRadians(kf.pitch),
       Cesium.Math.toRadians(kf.roll)
     );
@@ -275,10 +411,16 @@ function addEagleEntity() {
       minimumPixelSize: 32,       // never shrinks below 32 px when far away
       maximumScale:   2000,       // cap to avoid huge size near camera
       runAnimations:  false,      // static glide pose — no flapping yet
+      nodeTransformations: {
+        [EAGLE_MODEL_ANCHOR_NODE]: {
+          translation: EAGLE_MODEL_ANCHOR_TRANSLATION,
+        },
+      },
     },
     path: {
       leadTime:  0,
       trailTime: totalSec,
+      resolution: 1,
       width: 2,
       material: new Cesium.PolylineGlowMaterialProperty({
         glowPower: 0.25,
@@ -296,14 +438,26 @@ function updateCamera(time) {
   const pos = eagleEntity.position.getValue(time, new Cesium.Cartesian3());
   if (!pos) return;
 
-  const hDeg = headingSampled ? headingSampled.getValue(time) : null;
+  const currentHeading = headingSampled ? headingSampled.getValue(time) : null;
+  if (currentHeading == null) return;
+
+  const elapsed = Cesium.JulianDate.secondsDifference(time, viewer3D.clock.startTime);
+  const lagSec = Math.min(CAM_HEADING_LAG_SEC, Math.max(0, elapsed));
+  const laggedTime = Cesium.JulianDate.addSeconds(
+    time,
+    -lagSec,
+    new Cesium.JulianDate()
+  );
+  const hDeg = headingSampled.getValue(laggedTime) ?? currentHeading;
   if (hDeg == null) return;
+
+  const target = offsetCartesianMeters(pos, currentHeading, -CAM_FOCUS_BEHIND_M);
 
   /* HeadingPitchRange works in the local ENU frame at target — no
      reference-frame conversion needed, so the view stays stable.
-     heading = eagle's heading → camera is directly behind
+     heading = lagged eagle heading → camera follows turns with delay
      pitch   = negative       → camera looks down from above         */
-  viewer3D.camera.lookAt(pos, new Cesium.HeadingPitchRange(
+  viewer3D.camera.lookAt(target, new Cesium.HeadingPitchRange(
     Cesium.Math.toRadians(hDeg),
     Cesium.Math.toRadians(CAM_PITCH),
     CAM_RANGE
@@ -623,8 +777,10 @@ async function startApp() {
   /* Build sampled properties */
   setStatus("Building position data…");
   positionProp   = buildPositionProp(flightData.positions, epochJulian);
-  speedSampled   = buildScalarProp(flightData.speeds,   epochJulian);
-  headingSampled = buildScalarProp(flightData.headings, epochJulian);
+  // Heading and speed computed from consecutive GPS positions — more reliable
+  // than the CSV columns, which can be stale or zero during sparse GPS fixes.
+  headingSampled = buildHeadingFromPositions(flightData.positions, epochJulian);
+  speedSampled   = buildSpeedFromPositions(flightData.positions, epochJulian);
 
   setStatus("Precomputing orientation quaternions (this takes a few seconds)…");
   /* Yield to browser so "Building…" message renders before the heavy loop */
