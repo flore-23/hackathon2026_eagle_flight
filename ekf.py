@@ -97,6 +97,21 @@ def quat_from_axis_angle(theta_vec: np.ndarray) -> np.ndarray:
     return np.array([np.cos(half), theta_vec[0] * s, theta_vec[1] * s, theta_vec[2] * s])
 
 
+def quat_log(q: np.ndarray) -> np.ndarray:
+    """Inverse of `quat_from_axis_angle`: unit quaternion → 3-vector rotation
+    in axis-angle form (radians). Used by the RTS smoother to express the
+    attitude residual between two nominal quaternions in the tangent space."""
+    qn = quat_normalize(q)
+    if qn[0] < 0:
+        qn = -qn   # short-way rotation
+    v = qn[1:]
+    nv = np.linalg.norm(v)
+    if nv < 1e-9:
+        return 2.0 * v   # near identity
+    angle = 2.0 * np.arctan2(nv, qn[0])
+    return angle * v / nv
+
+
 def skew(v: np.ndarray) -> np.ndarray:
     return np.array([
         [    0, -v[2],  v[1]],
@@ -177,6 +192,10 @@ class StrapdownEKF:
         self.sigma_bg, self.sigma_ba = sigma_bg, sigma_ba
         self.R_gps = np.diag([sigma_gps_h ** 2, sigma_gps_h ** 2, sigma_gps_v ** 2])
 
+        # Captured by the most recent `predict()`; the RTS smoother reads it
+        # to walk back through the linearised dynamics.
+        self.last_F = np.eye(15)
+
     def predict(self, omega_meas: np.ndarray, f_meas: np.ndarray, dt: float):
         """Propagate nominal state and covariance forward by dt."""
         if dt <= 0:
@@ -197,6 +216,7 @@ class StrapdownEKF:
         F[6:9, 6:9] = -skew(omega)
         F[6:9, 9:12] = -np.eye(3)
         Fd = np.eye(15) + F * dt
+        self.last_F = Fd   # saved for the RTS smoother
 
         Q = np.zeros((15, 15))
         Q[3:6,   3:6]   = np.eye(3) * (self.sigma_a ** 2) * dt
@@ -285,3 +305,66 @@ class StrapdownEKF:
         I = np.eye(15)
         IKH = I - K @ H
         self.P = IKH @ self.P @ IKH.T + K @ Rm @ K.T   # Joseph form
+
+
+# ============================================================
+#  Rauch-Tung-Striebel smoother (offline / batch)
+# ============================================================
+#
+# Given the forward EKF's per-step records, runs a backward pass that uses
+# future data to refine each past estimate. For our error-state EKF, the
+# "error" between any two nominal states is taken in the tangent space:
+#   - position / velocity / biases : plain vector difference
+#   - attitude                     : log map of  q_pred⁻¹ ⊗ q_smooth
+# The smoother gain is C_k = P_post[k] · F[k+1]ᵀ · P_pred[k+1]⁻¹.
+# Smoothed nominal state at k =  inject(x_post[k],  C_k · err[k+1])
+# where err[k+1] is the smoothed-vs-predicted residual at step k+1.
+#
+# Inputs (all per-burst arrays of length n):
+#   xp_post, xv_post, xq_post, xbg_post, xba_post   — forward post-update nominal
+#   P_post                                          — forward post-update covariance (n×15×15)
+#   xp_pred, xv_pred, xq_pred, xbg_pred, xba_pred   — forward pre-update nominal
+#   P_pred                                          — forward pre-update covariance
+#   F                                               — F[k] = transition k-1 → k
+# Returns smoothed nominal as five arrays.
+
+def rts_smooth_burst(xp_post, xv_post, xq_post, xbg_post, xba_post, P_post,
+                     xp_pred, xv_pred, xq_pred, xbg_pred, xba_pred, P_pred,
+                     F):
+    n = xp_post.shape[0]
+    xp_s  = xp_post.copy()
+    xv_s  = xv_post.copy()
+    xq_s  = xq_post.copy()
+    xbg_s = xbg_post.copy()
+    xba_s = xba_post.copy()
+    P_s   = P_post[-1].copy()
+
+    err = np.zeros(15)
+    for k in range(n - 2, -1, -1):
+        # Smoother gain. Solve P_pred[k+1] · X = F[k+1] · P_post[k]ᵀ for X = Cᵀ;
+        # `solve` is numerically safer than explicit inv() when P_pred is
+        # near-singular (an unobservable axis on a step).
+        try:
+            CT = np.linalg.solve(P_pred[k + 1], F[k + 1] @ P_post[k].T)
+            C = CT.T
+        except np.linalg.LinAlgError:
+            continue   # leave smoothed[k] = post[k] (already copied)
+
+        # Residual in tangent space: smoothed[k+1] − predicted[k+1]
+        err[0:3]   = xp_s[k + 1]  - xp_pred[k + 1]
+        err[3:6]   = xv_s[k + 1]  - xv_pred[k + 1]
+        err[6:9]   = quat_log(quat_mult(quat_conj(xq_pred[k + 1]), xq_s[k + 1]))
+        err[9:12]  = xbg_s[k + 1] - xbg_pred[k + 1]
+        err[12:15] = xba_s[k + 1] - xba_pred[k + 1]
+
+        delta = C @ err
+
+        xp_s[k]  = xp_post[k]  + delta[0:3]
+        xv_s[k]  = xv_post[k]  + delta[3:6]
+        xq_s[k]  = quat_normalize(quat_mult(xq_post[k], quat_from_axis_angle(delta[6:9])))
+        xbg_s[k] = xbg_post[k] + delta[9:12]
+        xba_s[k] = xba_post[k] + delta[12:15]
+
+        P_s = P_post[k] + C @ (P_s - P_pred[k + 1]) @ C.T
+
+    return xp_s, xv_s, xq_s, xbg_s, xba_s

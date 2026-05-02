@@ -33,6 +33,7 @@ import csv
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from tqdm import tqdm
 
 from ekf import (
     G_NED,
@@ -43,6 +44,7 @@ from ekf import (
     quat_from_rpy,
     quat_to_rotmat,
     quat_to_rpy,
+    rts_smooth_burst,
 )
 
 
@@ -107,7 +109,7 @@ def load_orientation(path: str, resolution: str = "1hz") -> pd.DataFrame:
     freq = 20
 
     records = []
-    for _, row in df.iterrows():
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="  expanding orientation rows", unit="row"):
         base_time = row["second_ts"]
         roll_vals  = [float(x) for x in str(row["roll_deg"]).split()]
         pitch_vals = [float(x) for x in str(row["pitch_deg"]).split()]
@@ -141,7 +143,7 @@ def load_acceleration(path: str, resolution: str = "20hz") -> pd.DataFrame:
     step = {"1hz": 20, "5hz": 4, "20hz": 1}.get(resolution, 1)
 
     records = []
-    for _, row in df.iterrows():
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="  expanding acceleration rows", unit="row"):
         base_time = row["timestamp"]
         s = str(row.get("eobs_acceleration_g", ""))
         if not s.strip() or s == "nan":
@@ -222,12 +224,35 @@ def _estimate_initial_course(gps_df, t_start, t_end, n_samples=5, min_speed=2.0)
     return (np.degrees(np.arctan2(np.sin(rad).mean(), np.cos(rad).mean())) + 360.0) % 360.0
 
 
-def fuse_imu_bursts(merged_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFrame:
+def fuse_imu_bursts(merged_df: pd.DataFrame,
+                    gps_df: pd.DataFrame,
+                    has_magnetometer: bool = False,
+                    smooth: bool = True) -> pd.DataFrame:
     """Run the ESEKF over each contiguous IMU burst in `merged_df` and
     populate the new fused columns. Outside bursts every fused field is NaN.
 
     Requires `merged_df` to already contain (per row): roll/pitch/yaw (deg),
     has_orientation (bool), ax_body/ay_body/az_body (m/s²), lat/lon/altitude.
+
+    has_magnetometer
+        False (default): the IMU has no magnetometer, so its yaw is gyro-
+        integrated and drifts. We anchor it at burst start with the GPS
+        course and feed GPS-course measurements into the EKF (yaw "fused" with
+        GPS heading).  ⚠ This assumes near-zero side-slip; banked thermals
+        will leave residual error.
+
+        True: trust the IMU's yaw as absolute compass heading. Skip both the
+        per-burst yaw calibration and the EKF course updates.
+
+    smooth
+        True (default): after the forward EKF pass on each burst, run a
+        Rauch-Tung-Striebel backward smoother that uses future data to refine
+        every past estimate. Output columns (position, attitude, velocity,
+        omega via bias subtraction, acceleration) come from the smoothed
+        nominal trajectory.
+
+        False: write the forward-only EKF state. Use this for real-time-style
+        ablations or when comparing against the smoothed run.
     """
     new_cols = [
         "vx_body", "vy_body", "vz_body",
@@ -276,29 +301,52 @@ def fuse_imu_bursts(merged_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFra
 
     n_skipped_no_accel = 0
 
+    # Total samples to process across all bursts — used for the progress bar
+    # so the bar advances proportionally to actual work, not burst count
+    # (bursts can be 100× longer than each other).
+    total_steps = sum(max(0, e - s) for (s, e) in bursts if (e - s) >= 2)
+    pbar = tqdm(total=total_steps, desc="  EKF stepping", unit="sample")
+
+    cols = merged_df.columns
+    col_lat   = cols.get_loc("lat")
+    col_lon   = cols.get_loc("lon")
+    col_alt   = cols.get_loc("altitude")
+    col_gs    = cols.get_loc("ground_speed")
+    col_hd    = cols.get_loc("heading")
+    col_roll  = cols.get_loc("roll")
+    col_pitch = cols.get_loc("pitch")
+    col_yaw   = cols.get_loc("yaw")
+    col_vx    = cols.get_loc("vx_body")
+    col_vy    = cols.get_loc("vy_body")
+    col_vz    = cols.get_loc("vz_body")
+    col_ox    = cols.get_loc("omega_x")
+    col_oy    = cols.get_loc("omega_y")
+    col_oz    = cols.get_loc("omega_z")
+    col_ax    = cols.get_loc("ax_body_inertial")
+    col_ay    = cols.get_loc("ay_body_inertial")
+    col_az    = cols.get_loc("az_body_inertial")
+
     for (s, e) in bursts:
         burst_n = e - s
         if burst_n < 2:
             continue
 
+        # ---- Initial conditions ------------------------------------------------
         # Origin for local NED = first row's GPS position
         lat0, lon0, alt0 = lat_arr[s], lon_arr[s], alt_arr[s]
 
-        # Per-burst yaw calibration: the e-obs IMU integrates yaw from the
-        # gyro alone (no usable magnetometer on a bird-mounted unit), so its
-        # absolute value is unrelated to compass north. We anchor it by the
-        # GPS-derived course at the start of the burst, then trust the IMU
-        # yaw rate for everything else within the burst.
+        # Per-burst yaw calibration (skipped when has_magnetometer=True).
         t_start_burst = pd.Timestamp(timestamps[s])
         t_end_burst   = pd.Timestamp(timestamps[e - 1])
-        course0 = _estimate_initial_course(gps_df, t_start_burst, t_end_burst)
-        if course0 is not None:
-            yaw_offset_deg = ((course0 - yaw_arr[s] + 180.0) % 360.0) - 180.0
-        else:
+        if has_magnetometer:
             yaw_offset_deg = 0.0
+        else:
+            course0 = _estimate_initial_course(gps_df, t_start_burst, t_end_burst)
+            yaw_offset_deg = (((course0 - yaw_arr[s] + 180.0) % 360.0) - 180.0
+                              if course0 is not None else 0.0)
 
-        # Pre-build attitude quaternions for the whole burst (used both for
-        # initial state and for finite-diff omega input).
+        # Pre-build attitude quaternions over the burst (initial state +
+        # finite-diff omega input).
         q_seq = np.empty((burst_n, 4))
         for k in range(burst_n):
             r = np.radians(roll_arr[s + k])
@@ -306,7 +354,7 @@ def fuse_imu_bursts(merged_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFra
             y = np.radians(yaw_arr[s + k] + yaw_offset_deg)
             q_seq[k] = quat_from_rpy(r, p, y)
 
-        # Initial velocity from a 1-second GPS finite difference around burst start
+        # Initial velocity from a 1-second GPS finite-difference around burst start.
         t0 = pd.Timestamp(timestamps[s])
         prev_idx = np.searchsorted(gps_ts, np.datetime64(t0 - pd.Timedelta(seconds=1)), side="left")
         next_idx = np.searchsorted(gps_ts, np.datetime64(t0 + pd.Timedelta(seconds=1)), side="right") - 1
@@ -320,26 +368,20 @@ def fuse_imu_bursts(merged_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFra
 
         ekf = StrapdownEKF(q0=q_seq[0], p0=np.zeros(3), v0=v0)
 
-        # GPS samples that fall within this burst's time window
-        burst_start_ts = pd.Timestamp(timestamps[s])
-        burst_end_ts   = pd.Timestamp(timestamps[e - 1])
-        gps_mask = (gps_df["timestamp"] >= burst_start_ts) & (gps_df["timestamp"] <= burst_end_ts)
+        # GPS samples within the burst window.
+        gps_mask = (gps_df["timestamp"] >= t_start_burst) & (gps_df["timestamp"] <= t_end_burst)
         burst_gps = gps_df.loc[gps_mask].reset_index(drop=True)
         burst_gps_ts = burst_gps["timestamp"].values
         burst_gps_used = np.zeros(len(burst_gps), dtype=bool)
 
-        # GPS Doppler velocity per sample: GPS receivers compute ground_speed
-        # and heading from carrier-phase Doppler shift, which is far more
-        # accurate (~0.1 m/s) than finite-differencing positions. Feeding it as
-        # a direct velocity observation kills the position-only sawtooth.
-        # Vertical comes from a central altitude difference (loose σ).
-        gps_velocities = []      # (timestamp, v_NED, sigma_NED)
+        # GPS Doppler velocity per sample (smoother loves these).
+        gps_velocities = []
         for gi in range(len(burst_gps)):
-            ts = pd.Timestamp(burst_gps_ts[gi])
+            ts_v = pd.Timestamp(burst_gps_ts[gi])
             gs_v = burst_gps["ground_speed"].iat[gi]
             hd_v = burst_gps["heading"].iat[gi]
             if not (np.isfinite(gs_v) and np.isfinite(hd_v)) or gs_v < 0.5:
-                continue   # Doppler unreliable at near-zero speed
+                continue
             hd_rad = np.radians(hd_v)
             v_n = gs_v * np.cos(hd_rad)
             v_e = gs_v * np.sin(hd_rad)
@@ -351,65 +393,91 @@ def fuse_imu_bursts(merged_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFra
                        if dt_v > 0 else 0.0)
             else:
                 v_d = 0.0
-            gps_velocities.append((ts,
+            gps_velocities.append((ts_v,
                                    np.array([v_n, v_e, v_d]),
-                                   np.array([0.3, 0.3, 3.0])))   # m/s
+                                   np.array([0.3, 0.3, 3.0])))
         gps_velocity_used = np.zeros(len(gps_velocities), dtype=bool)
 
-        # Course observations: bearing of each consecutive GPS pair, applied
-        # at the midpoint timestamp. Speed-gated so we don't feed noise when
-        # the bird is hovering. σ scales with how far the GPS pair travelled
-        # (≈ position-noise / distance).
+        # Course observations (skipped when has_magnetometer=True).
         courses = []
-        SIGMA_POS = 5.0   # GPS horizontal noise (m) — matches the EKF prior
-        for gi in range(len(burst_gps) - 1):
-            t1 = pd.Timestamp(burst_gps_ts[gi])
-            t2 = pd.Timestamp(burst_gps_ts[gi + 1])
-            dt_gps = (t2 - t1).total_seconds()
-            if dt_gps <= 0:
-                continue
-            dist_m = _geo_dist_m(
-                burst_gps["lat"].iat[gi],     burst_gps["lon"].iat[gi],
-                burst_gps["lat"].iat[gi + 1], burst_gps["lon"].iat[gi + 1])
-            speed = dist_m / dt_gps
-            if speed < 2.0 or dist_m < 1.0:
-                continue
-            course_rad = np.radians(_geo_bearing(
-                burst_gps["lat"].iat[gi],     burst_gps["lon"].iat[gi],
-                burst_gps["lat"].iat[gi + 1], burst_gps["lon"].iat[gi + 1]))
-            sigma = max(0.05, min(0.6, SIGMA_POS / dist_m))   # rad
-            mid_ts = t1 + (t2 - t1) / 2
-            courses.append((mid_ts, course_rad, sigma))
+        SIGMA_POS = 5.0
+        if not has_magnetometer:
+            for gi in range(len(burst_gps) - 1):
+                t1 = pd.Timestamp(burst_gps_ts[gi])
+                t2 = pd.Timestamp(burst_gps_ts[gi + 1])
+                dt_gps = (t2 - t1).total_seconds()
+                if dt_gps <= 0:
+                    continue
+                dist_m = _geo_dist_m(
+                    burst_gps["lat"].iat[gi],     burst_gps["lon"].iat[gi],
+                    burst_gps["lat"].iat[gi + 1], burst_gps["lon"].iat[gi + 1])
+                if dist_m / dt_gps < 2.0 or dist_m < 1.0:
+                    continue
+                course_rad = np.radians(_geo_bearing(
+                    burst_gps["lat"].iat[gi],     burst_gps["lon"].iat[gi],
+                    burst_gps["lat"].iat[gi + 1], burst_gps["lon"].iat[gi + 1]))
+                sigma = max(0.05, min(0.6, SIGMA_POS / dist_m))
+                courses.append((t1 + (t2 - t1) / 2, course_rad, sigma))
         course_used = np.zeros(len(courses), dtype=bool)
 
-        # Step through the burst at the merged-timeline cadence (~20 Hz)
+        # ---- Forward pass (record per-step nominal + covariance + F) ----------
+        xp_post  = np.zeros((burst_n, 3))
+        xv_post  = np.zeros((burst_n, 3))
+        xq_post  = np.zeros((burst_n, 4))
+        xbg_post = np.zeros((burst_n, 3))
+        xba_post = np.zeros((burst_n, 3))
+        P_post   = np.zeros((burst_n, 15, 15))
+        xp_pred  = np.zeros((burst_n, 3))
+        xv_pred  = np.zeros((burst_n, 3))
+        xq_pred  = np.zeros((burst_n, 4))
+        xbg_pred = np.zeros((burst_n, 3))
+        xba_pred = np.zeros((burst_n, 3))
+        P_pred   = np.zeros((burst_n, 15, 15))
+        F_arr    = np.zeros((burst_n, 15, 15))
+        F_arr[0] = np.eye(15)   # no predict before step 0
+
+        # Cache the IMU input streams used for output reconstruction below.
+        omega_meas_arr = np.zeros((burst_n, 3))
+        f_meas_arr     = np.zeros((burst_n, 3))
+        f_avail_arr    = np.zeros(burst_n, dtype=bool)
+
         for k in range(burst_n):
             row_idx = s + k
 
-            if k > 0:
-                dt = (pd.Timestamp(timestamps[row_idx]) - pd.Timestamp(timestamps[row_idx - 1])).total_seconds()
+            # --- predict (skipped at k=0; x_pred[0] = x_post[0]) ---
+            if k == 0:
+                xp_pred[0] = ekf.p; xv_pred[0] = ekf.v; xq_pred[0] = ekf.q
+                xbg_pred[0] = ekf.b_g; xba_pred[0] = ekf.b_a
+                P_pred[0] = ekf.P.copy()
+            else:
+                dt = (pd.Timestamp(timestamps[row_idx])
+                      - pd.Timestamp(timestamps[row_idx - 1])).total_seconds()
                 if dt <= 0 or dt > 1.0:
-                    dt = 0.05  # safety fallback
+                    dt = 0.05
 
-                # ω from finite-diff of the data's attitude
-                if k < burst_n:
-                    omega_meas = omega_from_quat_pair(q_seq[k - 1], q_seq[k], dt)
-                else:
-                    omega_meas = np.zeros(3)
-
-                # Accel from data; if NaN (accel file gap), pretend 0 with high noise
+                omega_meas = omega_from_quat_pair(q_seq[k - 1], q_seq[k], dt)
                 ax = ax_arr[row_idx]; ay = ay_arr[row_idx]; az = az_arr[row_idx]
                 if not (np.isfinite(ax) and np.isfinite(ay) and np.isfinite(az)):
                     n_skipped_no_accel += 1
-                    f_meas = -G_NED  # fall back to "stationary" specific force
+                    f_meas = -G_NED
+                    f_avail_arr[k] = False
                 else:
                     f_meas = np.array([ax, ay, az])
+                    f_avail_arr[k] = True
+                omega_meas_arr[k] = omega_meas
+                f_meas_arr[k] = f_meas
 
                 ekf.predict(omega_meas, f_meas, dt)
 
-                # GPS update if a real GPS sample falls within this 50 ms window
+                xp_pred[k] = ekf.p; xv_pred[k] = ekf.v; xq_pred[k] = ekf.q.copy()
+                xbg_pred[k] = ekf.b_g; xba_pred[k] = ekf.b_a
+                P_pred[k] = ekf.P.copy()
+                F_arr[k] = ekf.last_F.copy()
+
+                # --- updates (GPS pos / course / Doppler vel) ---
                 row_ts = pd.Timestamp(timestamps[row_idx])
                 window = pd.Timedelta(seconds=dt / 2)
+
                 for gi in range(len(burst_gps)):
                     if burst_gps_used[gi]:
                         continue
@@ -422,7 +490,6 @@ def fuse_imu_bursts(merged_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFra
                         burst_gps_used[gi] = True
                         break
 
-                # Course observation if a midpoint falls in this row's window
                 for ci in range(len(courses)):
                     if course_used[ci]:
                         continue
@@ -431,7 +498,6 @@ def fuse_imu_bursts(merged_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFra
                         course_used[ci] = True
                         break
 
-                # Doppler velocity update at each GPS sample
                 for vi in range(len(gps_velocities)):
                     if gps_velocity_used[vi]:
                         continue
@@ -440,57 +506,59 @@ def fuse_imu_bursts(merged_df: pd.DataFrame, gps_df: pd.DataFrame) -> pd.DataFra
                         gps_velocity_used[vi] = True
                         break
 
-            # Output: rotate filtered velocity into body frame; gravity-removed
-            # body-frame inertial accel; bias-compensated body-frame omega.
-            R = quat_to_rotmat(ekf.q)
-            v_body = R.T @ ekf.v
-            f_comp = (np.array([ax_arr[row_idx], ay_arr[row_idx], az_arr[row_idx]])
-                      - ekf.b_a) if (np.isfinite(ax_arr[row_idx])
-                                      and np.isfinite(ay_arr[row_idx])
-                                      and np.isfinite(az_arr[row_idx])) else None
-            if f_comp is not None:
-                a_body_inertial = f_comp + R.T @ G_NED
+            # Snapshot the post-update state for the smoother.
+            xp_post[k] = ekf.p; xv_post[k] = ekf.v; xq_post[k] = ekf.q.copy()
+            xbg_post[k] = ekf.b_g; xba_post[k] = ekf.b_a
+            P_post[k] = ekf.P.copy()
+
+        # ---- Backward pass: RTS smoother --------------------------------------
+        if smooth:
+            xp_s, xv_s, xq_s, xbg_s, xba_s = rts_smooth_burst(
+                xp_post, xv_post, xq_post, xbg_post, xba_post, P_post,
+                xp_pred, xv_pred, xq_pred, xbg_pred, xba_pred, P_pred,
+                F_arr)
+        else:
+            xp_s, xv_s, xq_s, xbg_s, xba_s = (
+                xp_post, xv_post, xq_post, xbg_post, xba_post)
+
+        # ---- Output writeback from smoothed nominal trajectory ----------------
+        for k in range(burst_n):
+            row_idx = s + k
+            R = quat_to_rotmat(xq_s[k])
+            v_body = R.T @ xv_s[k]
+
+            if f_avail_arr[k]:
+                a_body_inertial = (f_meas_arr[k] - xba_s[k]) + R.T @ G_NED
             else:
                 a_body_inertial = np.array([np.nan, np.nan, np.nan])
 
-            if k > 0:
-                dt_now = (pd.Timestamp(timestamps[row_idx])
-                          - pd.Timestamp(timestamps[row_idx - 1])).total_seconds()
-                if dt_now <= 0 or dt_now > 1.0:
-                    dt_now = 0.05
-                omega_body = omega_from_quat_pair(q_seq[k - 1], q_seq[k], dt_now) - ekf.b_g
-            else:
-                omega_body = np.zeros(3)
+            omega_body = omega_meas_arr[k] - xbg_s[k] if k > 0 else np.zeros(3)
 
-            # ---- EKF-derived outputs (overwrite existing GPS-/IMU-data values
-            #      during bursts so every fused field comes from the filter) ----
-            # Position: filter NED → lat/lon/alt
-            lat_f, lon_f, alt_f = ned_to_lla(ekf.p[0], ekf.p[1], ekf.p[2], lat0, lon0, alt0)
-            # Attitude: filter quaternion → roll/pitch/yaw (deg)
-            roll_f, pitch_f, yaw_f = quat_to_rpy(ekf.q)
-            # Horizontal speed and compass heading from filter NED velocity
-            vN, vE = ekf.v[0], ekf.v[1]
-            gs_f = float(np.hypot(vN, vE))
+            lat_f, lon_f, alt_f = ned_to_lla(xp_s[k][0], xp_s[k][1], xp_s[k][2], lat0, lon0, alt0)
+            roll_f, pitch_f, yaw_f = quat_to_rpy(xq_s[k])
+            vN, vE = xv_s[k][0], xv_s[k][1]
+            gs_f  = float(np.hypot(vN, vE))
             hdg_f = (np.degrees(np.arctan2(vE, vN)) + 360.0) % 360.0
 
-            cols = merged_df.columns
-            merged_df.iat[row_idx, cols.get_loc("lat")]              = lat_f
-            merged_df.iat[row_idx, cols.get_loc("lon")]              = lon_f
-            merged_df.iat[row_idx, cols.get_loc("altitude")]         = alt_f
-            merged_df.iat[row_idx, cols.get_loc("ground_speed")]     = gs_f
-            merged_df.iat[row_idx, cols.get_loc("heading")]          = hdg_f
-            merged_df.iat[row_idx, cols.get_loc("roll")]             = np.degrees(roll_f)
-            merged_df.iat[row_idx, cols.get_loc("pitch")]            = np.degrees(pitch_f)
-            merged_df.iat[row_idx, cols.get_loc("yaw")]              = np.degrees(yaw_f)
-            merged_df.iat[row_idx, cols.get_loc("vx_body")]          = v_body[0]
-            merged_df.iat[row_idx, cols.get_loc("vy_body")]          = v_body[1]
-            merged_df.iat[row_idx, cols.get_loc("vz_body")]          = v_body[2]
-            merged_df.iat[row_idx, cols.get_loc("omega_x")]          = np.degrees(omega_body[0])
-            merged_df.iat[row_idx, cols.get_loc("omega_y")]          = np.degrees(omega_body[1])
-            merged_df.iat[row_idx, cols.get_loc("omega_z")]          = np.degrees(omega_body[2])
-            merged_df.iat[row_idx, cols.get_loc("ax_body_inertial")] = a_body_inertial[0]
-            merged_df.iat[row_idx, cols.get_loc("ay_body_inertial")] = a_body_inertial[1]
-            merged_df.iat[row_idx, cols.get_loc("az_body_inertial")] = a_body_inertial[2]
+            merged_df.iat[row_idx, col_lat]   = lat_f
+            merged_df.iat[row_idx, col_lon]   = lon_f
+            merged_df.iat[row_idx, col_alt]   = alt_f
+            merged_df.iat[row_idx, col_gs]    = gs_f
+            merged_df.iat[row_idx, col_hd]    = hdg_f
+            merged_df.iat[row_idx, col_roll]  = np.degrees(roll_f)
+            merged_df.iat[row_idx, col_pitch] = np.degrees(pitch_f)
+            merged_df.iat[row_idx, col_yaw]   = np.degrees(yaw_f)
+            merged_df.iat[row_idx, col_vx]    = v_body[0]
+            merged_df.iat[row_idx, col_vy]    = v_body[1]
+            merged_df.iat[row_idx, col_vz]    = v_body[2]
+            merged_df.iat[row_idx, col_ox]    = np.degrees(omega_body[0])
+            merged_df.iat[row_idx, col_oy]    = np.degrees(omega_body[1])
+            merged_df.iat[row_idx, col_oz]    = np.degrees(omega_body[2])
+            merged_df.iat[row_idx, col_ax]    = a_body_inertial[0]
+            merged_df.iat[row_idx, col_ay]    = a_body_inertial[1]
+            merged_df.iat[row_idx, col_az]    = a_body_inertial[2]
+        pbar.update(burst_n)
+    pbar.close()
 
     # Rename inertial-accel columns back to ax_body/ay_body/az_body for output
     # (the raw IMU specific-force columns are kept under ax_body_raw/etc.)
@@ -517,8 +585,30 @@ def merge(gps_path: str,
           orientation_path: str,
           acceleration_path: str,
           output_path: str,
-          resolution: str = "20hz"):
-    """Merge GPS + orientation + acceleration into one CSV, then run the EKF."""
+          resolution: str = "20hz",
+          has_magnetometer: bool = False,
+          smooth: bool = True):
+    """Merge GPS + orientation + acceleration into one CSV, then run the EKF.
+
+    When `has_magnetometer` is False (default) the EKF treats the IMU's yaw as
+    relative-only and fuses GPS course / heading into it. Set True once the
+    IMU stream actually contains a magnetometer-stabilised yaw.
+
+    When `smooth` is True (default), an RTS smoother runs after the forward
+    EKF pass on each burst. All output columns (position, attitude, velocity,
+    body-frame omega and accel) come from the smoothed nominal trajectory.
+    Pass False to write the forward-only EKF state for ablation comparisons.
+    """
+
+    if not has_magnetometer:
+        print("⚠  IMU yaw is being fused with GPS heading (no magnetometer assumed).")
+        print("   Once magnetometer data is available, re-run with --has-magnetometer.")
+    else:
+        print("✓  Trusting IMU yaw as absolute (magnetometer-stabilised); skipping GPS-course fusion.")
+    if smooth:
+        print("✓  RTS smoother enabled — outputs use forward EKF + backward smoother.")
+    else:
+        print("⚠  RTS smoother disabled — outputs are forward-EKF-only (causal).")
 
     print(f"Loading GPS data from {gps_path} ...")
     gps_df = load_gps(gps_path)
@@ -567,9 +657,11 @@ def merge(gps_path: str,
         for c in ("ax_body", "ay_body", "az_body"):
             merged[c] = np.nan
 
-    # Run the EKF
+    # Run the EKF (+ optional RTS smoother)
     print("Running ESEKF over IMU bursts …")
-    merged = fuse_imu_bursts(merged, gps_df)
+    merged = fuse_imu_bursts(merged, gps_df,
+                             has_magnetometer=has_magnetometer,
+                             smooth=smooth)
 
     # Drop the raw specific-force columns from the output (kept as
     # ax_body_raw/etc. internally; remove for a clean public schema).
@@ -595,5 +687,18 @@ if __name__ == "__main__":
     parser.add_argument("--output",       required=True, help="Output merged CSV path")
     parser.add_argument("--resolution",   default="20hz", choices=["1hz", "5hz", "20hz"],
                         help="Output resolution (default: 20hz)")
+    parser.add_argument("--has-magnetometer", action="store_true",
+                        help="Trust the IMU's yaw as absolute compass heading "
+                             "(skip per-burst yaw calibration and GPS-course "
+                             "EKF updates). Default: off — yaw is fused with "
+                             "GPS heading because the e-obs IMU has no "
+                             "usable magnetometer.")
+    parser.add_argument("--no-smooth", action="store_true",
+                        help="Disable the RTS backward smoother. Outputs "
+                             "will be the forward EKF state only (causal). "
+                             "Default: smoother on.")
     args = parser.parse_args()
-    merge(args.gps, args.orientation, args.acceleration, args.output, args.resolution)
+    merge(args.gps, args.orientation, args.acceleration, args.output,
+          args.resolution,
+          has_magnetometer=args.has_magnetometer,
+          smooth=not args.no_smooth)
