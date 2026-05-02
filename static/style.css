@@ -115,3 +115,124 @@ html, body { height: 100%; overflow: hidden; font-family: system-ui, sans-serif;
 
 /* Leaflet overrides */
 .leaflet-container { background: #1a1a2a; }
+
+/* ===== Plot area (PlotJuggler-style) ===== */
+#plot-area {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #141414;
+  border-top: 1px solid #2a2a2a;
+  height: 36px;          /* palette-only by default; user grows via resize handle */
+  min-height: 36px;
+}
+
+/* Global resize handle — sits between the upper viewers and the plot area.
+   Drag up = grow plot area; drag down = shrink. */
+#plot-area-resize {
+  flex-shrink: 0;
+  height: 5px;
+  background: #1a1a1a;
+  cursor: ns-resize;
+}
+#plot-area-resize:hover { background: #e67e22; }
+
+#plot-palette {
+  flex-shrink: 0;
+  height: 36px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 12px;
+  background: #181818;
+  border-bottom: 1px solid #232323;
+}
+#plot-palette-label {
+  font-size: .72rem; color: #888; flex-shrink: 0;
+  text-transform: uppercase; letter-spacing: .5px;
+}
+#plot-palette-chips { display: flex; gap: 6px; flex-shrink: 0; }
+
+.plot-chip {
+  font-size: .72rem;
+  padding: 3px 10px;
+  border: 1px solid;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.04);
+  cursor: grab;
+  user-select: none;
+  white-space: nowrap;
+}
+.plot-chip:active { cursor: grabbing; }
+.plot-chip:hover { background: rgba(255,255,255,0.09); }
+
+#plot-drop-zone {
+  flex: 1;
+  height: 24px;
+  border: 1px dashed #3a3a3a;
+  border-radius: 4px;
+  font-size: .7rem; color: #555;
+  display: flex; align-items: center; justify-content: center;
+  transition: border-color .15s, color .15s, background .15s;
+}
+#plot-drop-zone.dragover {
+  border-color: #e67e22; color: #e67e22; background: rgba(230,126,34,.08);
+}
+
+#plot-windows {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.plot-window {
+  position: relative;
+  flex: 1;
+  min-height: 50px;
+  display: flex; flex-direction: column;
+  background: #0e0e0e;
+  border-bottom: 1px solid #232323;
+}
+.plot-window.dragover { background: rgba(230,126,34,.06); }
+
+.plot-window-header {
+  flex-shrink: 0;
+  height: 24px;
+  display: flex; align-items: center;
+  padding: 0 8px;
+  background: #181818;
+  border-bottom: 1px solid #232323;
+  font-size: .7rem;
+}
+.plot-window-legend { flex: 1; display: flex; gap: 12px; align-items: center; }
+.plot-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.plot-legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.plot-legend-remove {
+  border: none; background: none; color: #666;
+  cursor: pointer; font-size: .9rem; padding: 0 2px; line-height: 1;
+}
+.plot-legend-remove:hover { color: #e74c3c; }
+.plot-window-close {
+  border: none; background: none; color: #777;
+  cursor: pointer; font-size: 1.1rem; padding: 0 6px; line-height: 1;
+}
+.plot-window-close:hover { color: #e74c3c; }
+
+.plot-window-body { flex: 1; position: relative; overflow: hidden; }
+
+.plot-window-cursor {
+  position: absolute;
+  top: 0; bottom: 24px;          /* leave room for x-axis labels */
+  width: 1px; background: #fff;
+  pointer-events: none;
+  display: none;
+  z-index: 5;
+  box-shadow: 0 0 3px rgba(255,255,255,.4);
+}
+
+/* uPlot dark-theme tweaks */
+.uplot, .uplot * { font-family: system-ui, sans-serif; }
+.u-axis { color: #888; }
+.u-legend { display: none; }
+.uplot .u-axis-x { cursor: ew-resize; }
+.uplot .u-axis-y { cursor: ns-resize; }

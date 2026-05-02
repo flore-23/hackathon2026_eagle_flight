@@ -667,6 +667,407 @@ function setupViewToggle() {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Plot windows (PlotJuggler-style)                                    */
+/* ------------------------------------------------------------------ */
+// Color is keyed off the unit (m / m/s / deg) so all variables sharing a unit
+// share a swatch in the palette and on the charts.
+const COLOR_BY_UNIT = {
+  "m":   "#3498db",   // blue
+  "m/s": "#2ecc71",   // green
+  "deg": "#e67e22",   // orange (app accent)
+};
+const PLOT_SERIES = {
+  altitude:     { label: "altitude (m)",       unit: "m",   color: COLOR_BY_UNIT["m"]   },
+  ground_speed: { label: "ground_speed (m/s)", unit: "m/s", color: COLOR_BY_UNIT["m/s"] },
+  heading:      { label: "heading (deg)",      unit: "deg", color: COLOR_BY_UNIT["deg"] },
+  roll:         { label: "roll (deg)",         unit: "deg", color: COLOR_BY_UNIT["deg"] },
+  pitch:        { label: "pitch (deg)",        unit: "deg", color: COLOR_BY_UNIT["deg"] },
+  yaw:          { label: "yaw (deg)",          unit: "deg", color: COLOR_BY_UNIT["deg"] },
+};
+
+const ORIENT_GAP_THRESH = 5;   // sec — bigger gap → break the line
+const seriesDataCache = {};
+const plotWindows = [];
+let plotIdCounter = 0;
+
+function getSeriesData(name) {
+  if (seriesDataCache[name]) return seriesDataCache[name];
+  let xs, ys;
+  if (name === "altitude") {
+    const p = flightData.positions;
+    const n = (p.length / 4) | 0;
+    xs = new Array(n); ys = new Array(n);
+    for (let i = 0; i < n; i++) { xs[i] = p[i*4]; ys[i] = p[i*4 + 3]; }
+  } else if (name === "ground_speed" || name === "heading") {
+    const arr = name === "ground_speed" ? flightData.speeds : flightData.headings;
+    const n = (arr.length / 2) | 0;
+    xs = new Array(n); ys = new Array(n);
+    for (let i = 0; i < n; i++) { xs[i] = arr[i*2]; ys[i] = arr[i*2 + 1]; }
+  } else {  // roll, pitch, yaw — sparse, insert null gaps between bursts
+    const o = flightData.orientations;
+    const t = o.times, v = o[name];
+    xs = []; ys = [];
+    for (let i = 0; i < t.length; i++) {
+      if (i > 0 && t[i] - t[i-1] > ORIENT_GAP_THRESH) {
+        xs.push((t[i-1] + t[i]) / 2);
+        ys.push(null);
+      }
+      xs.push(t[i]); ys.push(v[i]);
+    }
+  }
+  seriesDataCache[name] = { xs, ys };
+  return seriesDataCache[name];
+}
+
+/** Merge multiple (xs, ys) series into uPlot's [xMaster, ys1, ys2, ...] form. */
+function buildUplotData(seriesNames) {
+  if (seriesNames.length === 0) return [[]];
+  const sources = seriesNames.map(getSeriesData);
+  const xSet = new Set();
+  for (const s of sources) for (const x of s.xs) xSet.add(x);
+  const xMerged = Array.from(xSet).sort((a, b) => a - b);
+  const out = [xMerged];
+  for (const s of sources) {
+    const map = new Map();
+    for (let i = 0; i < s.xs.length; i++) map.set(s.xs[i], s.ys[i]);
+    const ys = new Array(xMerged.length);
+    for (let i = 0; i < xMerged.length; i++) {
+      const v = map.get(xMerged[i]);
+      ys[i] = v === undefined ? null : v;
+    }
+    out.push(ys);
+  }
+  return out;
+}
+
+const plotResizeObserver = new ResizeObserver((entries) => {
+  for (const entry of entries) {
+    const win = plotWindows.find(w => w.body === entry.target);
+    if (!win || !win.uplot) continue;
+    const w = entry.contentRect.width, h = entry.contentRect.height;
+    if (w > 0 && h > 0) win.uplot.setSize({ width: w, height: h });
+  }
+});
+
+function initPlotPalette() {
+  const chipsEl = document.getElementById("plot-palette-chips");
+  for (const [name, info] of Object.entries(PLOT_SERIES)) {
+    const chip = document.createElement("div");
+    chip.className = "plot-chip";
+    chip.draggable = true;
+    chip.dataset.series = name;
+    chip.textContent = info.label;
+    chip.style.borderColor = info.color;
+    chip.style.color = info.color;
+    chip.addEventListener("dragstart", (e) => {
+      e.dataTransfer.setData("text/plain", name);
+      e.dataTransfer.effectAllowed = "copy";
+    });
+    chipsEl.appendChild(chip);
+  }
+  const dropZone = document.getElementById("plot-drop-zone");
+  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropZone.classList.remove("dragover");
+    const name = e.dataTransfer.getData("text/plain");
+    if (name && PLOT_SERIES[name]) createPlotWindow([name]);
+  });
+}
+
+function createPlotWindow(initialSeries) {
+  const id = ++plotIdCounter;
+  const el = document.createElement("div");
+  el.className = "plot-window";
+  el.dataset.id = id;
+  el.innerHTML = `
+    <div class="plot-window-header">
+      <div class="plot-window-legend"></div>
+      <button class="plot-window-close" title="Remove plot">×</button>
+    </div>
+    <div class="plot-window-body">
+      <div class="plot-window-cursor"></div>
+    </div>
+  `;
+  const win = {
+    id, el,
+    body:   el.querySelector(".plot-window-body"),
+    cursor: el.querySelector(".plot-window-cursor"),
+    legend: el.querySelector(".plot-window-legend"),
+    series: [],
+    uplot: null,
+  };
+
+  el.addEventListener("dragover", (e) => { e.preventDefault(); el.classList.add("dragover"); });
+  el.addEventListener("dragleave", (e) => { if (!el.contains(e.relatedTarget)) el.classList.remove("dragover"); });
+  el.addEventListener("drop", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    el.classList.remove("dragover");
+    const name = e.dataTransfer.getData("text/plain");
+    if (name && PLOT_SERIES[name] && !win.series.includes(name)) {
+      win.series.push(name);
+      rebuildWindowChart(win);
+    }
+  });
+
+  el.querySelector(".plot-window-close").addEventListener("click", () => removePlotWindow(win));
+
+  document.getElementById("plot-windows").appendChild(el);
+  plotWindows.push(win);
+  plotResizeObserver.observe(win.body);
+  ensurePlotAreaExpanded();
+
+  for (const name of initialSeries) {
+    if (!win.series.includes(name)) win.series.push(name);
+  }
+  rebuildWindowChart(win);
+  return win;
+}
+
+function rebuildWindowChart(win) {
+  win.legend.innerHTML = "";
+  for (const name of win.series) {
+    const info = PLOT_SERIES[name];
+    const tag = document.createElement("span");
+    tag.className = "plot-legend-item";
+    tag.style.color = info.color;
+    tag.innerHTML = `<span class="plot-legend-dot" style="background:${info.color}"></span>${info.label}<button class="plot-legend-remove" title="Remove">×</button>`;
+    tag.querySelector(".plot-legend-remove").addEventListener("click", () => {
+      win.series = win.series.filter(s => s !== name);
+      if (win.series.length === 0) removePlotWindow(win);
+      else rebuildWindowChart(win);
+    });
+    win.legend.appendChild(tag);
+  }
+
+  if (win.uplot) { win.uplot.destroy(); win.uplot = null; }
+  if (win.series.length === 0) return;
+
+  const data = buildUplotData(win.series);
+  const w = Math.max(50, win.body.clientWidth);
+  const h = Math.max(50, win.body.clientHeight);
+  win.initialScales = null;
+  const opts = {
+    width: w, height: h,
+    cursor:  { show: false },
+    legend:  { show: false },
+    scales:  { x: { time: false } },
+    axes: [
+      { stroke: "#888", grid: { stroke: "#262626" }, ticks: { stroke: "#444" }, font: "11px system-ui" },
+      { stroke: "#888", grid: { stroke: "#262626" }, ticks: { stroke: "#444" }, font: "11px system-ui", size: 50 },
+    ],
+    series: [
+      { label: "t" },
+      ...win.series.map(name => ({
+        label:  PLOT_SERIES[name].label,
+        stroke: PLOT_SERIES[name].color,
+        width: 1.5,
+        spanGaps: false,
+        points: { show: false },
+      })),
+    ],
+    hooks: {
+      ready: [(u) => {
+        win.initialScales = {
+          x: { min: u.scales.x.min, max: u.scales.x.max },
+          y: { min: u.scales.y.min, max: u.scales.y.max },
+        };
+        if (win.xRange == null) {
+          win.xRange = win.initialScales.x.max - win.initialScales.x.min;
+        }
+        // Snap to a view centered on the current playback time.
+        if (viewer3D && viewer3D.clock) {
+          const e = Cesium.JulianDate.secondsDifference(
+            viewer3D.clock.currentTime, viewer3D.clock.startTime);
+          u.setScale("x", { min: e - win.xRange / 2, max: e + win.xRange / 2 });
+        }
+      }],
+    },
+  };
+  win.uplot = new uPlot(opts, data, win.body);
+  attachZoomHandlers(win);
+}
+
+function removePlotWindow(win) {
+  if (win.uplot) { win.uplot.destroy(); win.uplot = null; }
+  plotResizeObserver.unobserve(win.body);
+  win.el.remove();
+  const i = plotWindows.indexOf(win);
+  if (i >= 0) plotWindows.splice(i, 1);
+}
+
+/** First time a window is added, expand the plot area to a sensible default. */
+function ensurePlotAreaExpanded() {
+  const area = document.getElementById("plot-area");
+  if (area.offsetHeight < 80) area.style.height = "260px";
+}
+
+/** Single drag handle at the top of the plot area resizes the whole pane. */
+function initPlotAreaResize() {
+  const handle = document.getElementById("plot-area-resize");
+  const area = document.getElementById("plot-area");
+  handle.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = area.offsetHeight;
+    const maxH = Math.floor(window.innerHeight * 0.85);
+    const onMove = (ev) => {
+      const h = Math.max(36, Math.min(maxH, startH - (ev.clientY - startY)));
+      area.style.height = h + "px";
+      if (lmap) lmap.invalidateSize();
+      if (viewer3D && viewer3D.resize) viewer3D.resize();
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
+/**
+ * Wheel zoom for "follow time" mode:
+ *  - Wheel on plot area  → zoom X-window + Y (X anchored at the centerline,
+ *                          Y anchored at the mouse cursor)
+ *  - Wheel on x axis     → shrink/grow the visible time window
+ *  - Wheel on y axis     → zoom Y only (anchored at mouse y)
+ *  - Double-click        → reset window to full data extent and y to initial
+ */
+function attachZoomHandlers(win) {
+  const u = win.uplot;
+  const overEl  = u.over;
+  const xAxisEl = u.root.querySelector(".u-axis.u-axis-x") || u.root.querySelectorAll(".u-axis")[0];
+  const yAxisEl = u.root.querySelector(".u-axis.u-axis-y") || u.root.querySelectorAll(".u-axis")[1];
+
+  // Fallback initial-scale capture if the ready hook hasn't fired yet.
+  if (!win.initialScales || win.initialScales.x.min == null) {
+    if (u.scales.x.min != null && u.scales.y.min != null) {
+      win.initialScales = {
+        x: { min: u.scales.x.min, max: u.scales.x.max },
+        y: { min: u.scales.y.min, max: u.scales.y.max },
+      };
+      if (win.xRange == null) win.xRange = win.initialScales.x.max - win.initialScales.x.min;
+    }
+  }
+
+  function getElapsed() {
+    if (!viewer3D || !viewer3D.clock) return 0;
+    return Cesium.JulianDate.secondsDifference(
+      viewer3D.clock.currentTime, viewer3D.clock.startTime);
+  }
+
+  /** Apply the current xRange centered on `elapsed`. */
+  function applyXWindow() {
+    if (win.xRange == null) return;
+    const e = getElapsed();
+    u.setScale("x", { min: e - win.xRange / 2, max: e + win.xRange / 2 });
+    placeCursorCenter(win);
+  }
+
+  /** Y-axis zoom anchored at a data-y value. Clamped to the y data extent. */
+  function zoomY(factor, anchor) {
+    const sc = u.scales.y;
+    const init = win.initialScales && win.initialScales.y;
+    if (sc.min == null || sc.max == null || !Number.isFinite(anchor)) return;
+    let newMin = anchor - (anchor - sc.min) * factor;
+    let newMax = anchor + (sc.max - anchor) * factor;
+    if (init && init.min != null) {
+      const fullRange = init.max - init.min;
+      if (newMax - newMin >= fullRange) {
+        newMin = init.min; newMax = init.max;
+      } else {
+        if (newMin < init.min) { newMax += init.min - newMin; newMin = init.min; }
+        if (newMax > init.max) { newMin -= newMax - init.max; newMax = init.max; }
+      }
+    }
+    if (newMin < newMax) u.setScale("y", { min: newMin, max: newMax });
+  }
+
+  /** X-window zoom: scale the visible time window, keeping it centered on `elapsed`. */
+  function zoomXWindow(factor) {
+    if (win.xRange == null) return;
+    const init = win.initialScales && win.initialScales.x;
+    let newRange = win.xRange * factor;
+    if (init && init.min != null) {
+      const fullRange = init.max - init.min;
+      if (newRange > fullRange) newRange = fullRange;
+    }
+    if (newRange < 0.1) newRange = 0.1;   // ~100 ms minimum window
+    win.xRange = newRange;
+    applyXWindow();
+  }
+
+  function anchorYVal(e) {
+    const r = overEl.getBoundingClientRect();
+    return u.posToVal(e.clientY - r.top, "y");
+  }
+
+  const ZOOM_K = 0.0015;
+
+  overEl.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const factor = Math.exp(e.deltaY * ZOOM_K);
+    zoomXWindow(factor);
+    zoomY(factor, anchorYVal(e));
+  }, { passive: false });
+
+  if (xAxisEl) xAxisEl.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoomXWindow(Math.exp(e.deltaY * ZOOM_K));
+  }, { passive: false });
+
+  if (yAxisEl) yAxisEl.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoomY(Math.exp(e.deltaY * ZOOM_K), anchorYVal(e));
+  }, { passive: false });
+
+  overEl.addEventListener("dblclick", () => {
+    const init = win.initialScales;
+    if (!init || init.x.min == null || init.y.min == null) return;
+    win.xRange = init.x.max - init.x.min;
+    applyXWindow();
+    u.setScale("y", init.y);
+  });
+}
+
+/**
+ * Position the playback cursor at the visual horizontal center of the plot
+ * drawing area. The chart slides so the current playback time is at this
+ * centerline, so the cursor itself never moves (relative to the chart frame).
+ */
+function placeCursorCenter(w) {
+  if (!w.uplot) { w.cursor.style.display = "none"; return; }
+  const overRect = w.uplot.over.getBoundingClientRect();
+  if (overRect.width <= 0) { w.cursor.style.display = "none"; return; }
+  const bodyRect = w.body.getBoundingClientRect();
+  w.cursor.style.display = "block";
+  w.cursor.style.left = ((overRect.left - bodyRect.left) + overRect.width / 2) + "px";
+}
+
+/**
+ * Per-tick update: slide each chart's x-range so the current playback time
+ * sits at the cursor (center), then re-center the cursor itself.
+ */
+function updatePlotCursors(elapsedSec) {
+  for (const w of plotWindows) {
+    if (!w.uplot || w.xRange == null) {
+      if (w.cursor) w.cursor.style.display = "none";
+      continue;
+    }
+    const half = w.xRange / 2;
+    const sc = w.uplot.scales.x;
+    const newMin = elapsedSec - half;
+    const newMax = elapsedSec + half;
+    if (sc.min !== newMin || sc.max !== newMax) {
+      w.uplot.setScale("x", { min: newMin, max: newMax });
+    }
+    placeCursorCenter(w);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Custom HTML timeline                                               */
 /* ------------------------------------------------------------------ */
 function buildTimeline() {
@@ -713,6 +1114,9 @@ function buildTimeline() {
     /* Camera + Leaflet marker */
     updateCamera(clock.currentTime);
     updateLeafletMarker(clock.currentTime);
+
+    /* Plot cursors */
+    updatePlotCursors(elapsed);
   });
 
   /* Click on track → seek */
@@ -813,6 +1217,10 @@ async function startApp() {
   buildTimeline();
   setupPlayback();
   setupViewToggle();
+
+  /* Plot palette (PlotJuggler-style draggable variables) */
+  initPlotPalette();
+  initPlotAreaResize();
 
   /* Start playing */
   viewer3D.clock.shouldAnimate = true;

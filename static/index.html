@@ -13,6 +13,10 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
+  <!-- uPlot (timeline-synced plots) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -65,6 +69,19 @@
       <div id="cesium-map" class="hidden"></div>
     </div>
 
+  </div>
+
+  <!-- ============================================================ -->
+  <!--  PLOT AREA  (PlotJuggler-style)                              -->
+  <!-- ============================================================ -->
+  <div id="plot-area">
+    <div id="plot-area-resize" title="Drag to resize plot area"></div>
+    <div id="plot-palette">
+      <div id="plot-palette-label">Drag data</div>
+      <div id="plot-palette-chips"></div>
+      <div id="plot-drop-zone">drop here for new plot</div>
+    </div>
+    <div id="plot-windows"></div>
   </div>
 
   <!-- ============================================================ -->
