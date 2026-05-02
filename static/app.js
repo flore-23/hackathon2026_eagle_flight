@@ -669,20 +669,17 @@ function setupViewToggle() {
 /* ------------------------------------------------------------------ */
 /*  Plot windows (PlotJuggler-style)                                    */
 /* ------------------------------------------------------------------ */
-// Color is keyed off the unit (m / m/s / deg) so all variables sharing a unit
-// share a swatch in the palette and on the charts.
-const COLOR_BY_UNIT = {
-  "m":   "#3498db",   // blue
-  "m/s": "#2ecc71",   // green
-  "deg": "#e67e22",   // orange (app accent)
-};
+// Variables sharing a unit live in the same color family but get distinct hues
+// so they remain distinguishable when overlaid in one plot window.
 const PLOT_SERIES = {
-  altitude:     { label: "altitude (m)",       unit: "m",   color: COLOR_BY_UNIT["m"]   },
-  ground_speed: { label: "ground_speed (m/s)", unit: "m/s", color: COLOR_BY_UNIT["m/s"] },
-  heading:      { label: "heading (deg)",      unit: "deg", color: COLOR_BY_UNIT["deg"] },
-  roll:         { label: "roll (deg)",         unit: "deg", color: COLOR_BY_UNIT["deg"] },
-  pitch:        { label: "pitch (deg)",        unit: "deg", color: COLOR_BY_UNIT["deg"] },
-  yaw:          { label: "yaw (deg)",          unit: "deg", color: COLOR_BY_UNIT["deg"] },
+  // m — blue family (only one for now)
+  altitude:     { label: "altitude (m)",       unit: "m",   color: "#3498db" },
+  // m/s — green family (only one for now)
+  ground_speed: { label: "ground_speed (m/s)", unit: "m/s", color: "#2ecc71" },
+  // deg — warm family, each distinguishable
+  roll:         { label: "roll (deg)",         unit: "deg", color: "#e74c3c" }, // red
+  pitch:        { label: "pitch (deg)",        unit: "deg", color: "#f1c40f" }, // yellow
+  yaw:          { label: "yaw (deg)",          unit: "deg", color: "#e67e22" }, // orange
 };
 
 const ORIENT_GAP_THRESH = 5;   // sec — bigger gap → break the line
@@ -698,8 +695,8 @@ function getSeriesData(name) {
     const n = (p.length / 4) | 0;
     xs = new Array(n); ys = new Array(n);
     for (let i = 0; i < n; i++) { xs[i] = p[i*4]; ys[i] = p[i*4 + 3]; }
-  } else if (name === "ground_speed" || name === "heading") {
-    const arr = name === "ground_speed" ? flightData.speeds : flightData.headings;
+  } else if (name === "ground_speed") {
+    const arr = flightData.speeds;
     const n = (arr.length / 2) | 0;
     xs = new Array(n); ys = new Array(n);
     for (let i = 0; i < n; i++) { xs[i] = arr[i*2]; ys[i] = arr[i*2 + 1]; }
