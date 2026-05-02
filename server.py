@@ -41,6 +41,14 @@ RESOLUTION = "20hz"
 POSITION_SUBSAMPLE = 20  # keep every 20th row for position data
 
 
+def _safe_round(x, ndigits: int):
+    """Round to ndigits, but emit None for NaN/Inf so JSON encoding works."""
+    fx = float(x)
+    if not np.isfinite(fx):
+        return None
+    return round(fx, ndigits)
+
+
 def build_flight_json(merged: pd.DataFrame) -> dict:
     """Convert a merged DataFrame into a compact JSON payload for the frontend.
 
@@ -73,11 +81,11 @@ def build_flight_json(merged: pd.DataFrame) -> dict:
     headings = []
     for i in idx:
         t = round(t_sec[i], 3)
-        positions.extend([t, round(float(merged["lon"].iat[i]), 6),
-                             round(float(merged["lat"].iat[i]), 6),
-                             round(float(merged["altitude"].iat[i]), 1)])
-        speeds.extend([t, round(float(merged["ground_speed"].iat[i]), 2)])
-        headings.extend([t, round(float(merged["heading"].iat[i]), 2)])
+        positions.extend([t, _safe_round(merged["lon"].iat[i], 6),
+                             _safe_round(merged["lat"].iat[i], 6),
+                             _safe_round(merged["altitude"].iat[i], 1)])
+        speeds.extend([t, _safe_round(merged["ground_speed"].iat[i], 2)])
+        headings.extend([t, _safe_round(merged["heading"].iat[i], 2)])
 
     # --- orientations: only rows with data ---
     orient_mask = merged["has_orientation"].values
@@ -87,11 +95,20 @@ def build_flight_json(merged: pd.DataFrame) -> dict:
     orient_yaw = merged.loc[orient_mask, "yaw"].values
 
     orientations = {
-        "times": [round(float(x), 3) for x in orient_t],
-        "roll":  [round(float(x), 3) for x in orient_roll],
-        "pitch": [round(float(x), 3) for x in orient_pitch],
-        "yaw":   [round(float(x), 3) for x in orient_yaw],
+        "times": [_safe_round(x, 3) for x in orient_t],
+        "roll":  [_safe_round(x, 3) for x in orient_roll],
+        "pitch": [_safe_round(x, 3) for x in orient_pitch],
+        "yaw":   [_safe_round(x, 3) for x in orient_yaw],
     }
+
+    # EKF-fused fields share the orientation timestamps (they're populated
+    # only during IMU bursts). Forward whatever the merged CSV contains.
+    for col in ("vx_body", "vy_body", "vz_body",
+                "omega_x", "omega_y", "omega_z",
+                "ax_body", "ay_body", "az_body"):
+        if col in merged.columns:
+            vals = merged.loc[orient_mask, col].values
+            orientations[col] = [_safe_round(x, 3) for x in vals]
 
     # --- orientation intervals (contiguous blocks of has_orientation=True) ---
     intervals = []
@@ -156,7 +173,7 @@ async def upload_files(
 
 
 # ----- also serve pre-merged demo data if it exists -----
-DEMO_DATA_PATH = Path("Data/merged_day1_20hz.csv")
+DEMO_DATA_PATH = Path(__file__).resolve().parent / "Data" / "merged_day1_20hz.csv"
 
 
 @app.get("/api/demo")

@@ -43,26 +43,8 @@ const EAGLE_MODEL_ANCHOR_TRANSLATION = new Cesium.Cartesian3(
 );
 
 /* ------------------------------------------------------------------ */
-/*  Geo helpers: bearing and speed from consecutive GPS positions       */
+/*  Geo helpers                                                         */
 /* ------------------------------------------------------------------ */
-
-/** Great-circle bearing from point 1 to point 2, degrees [0, 360). */
-function geoBearing(lat1, lon1, lat2, lon2) {
-  const R2D = 180 / Math.PI, D2R = Math.PI / 180;
-  const φ1 = lat1 * D2R, φ2 = lat2 * D2R, Δλ = (lon2 - lon1) * D2R;
-  const y = Math.sin(Δλ) * Math.cos(φ2);
-  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
-  return (Math.atan2(y, x) * R2D + 360) % 360;
-}
-
-/** Haversine distance in metres between two lat/lon points. */
-function geoDistM(lat1, lon1, lat2, lon2) {
-  const D2R = Math.PI / 180, R = 6371000;
-  const Δφ = (lat2 - lat1) * D2R, Δλ = (lon2 - lon1) * D2R;
-  const a = Math.sin(Δφ / 2) ** 2
-          + Math.cos(lat1 * D2R) * Math.cos(lat2 * D2R) * Math.sin(Δλ / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
 
 function unwrapHeadingDegrees(previous, next) {
   if (previous == null) return next;
@@ -83,76 +65,6 @@ function offsetCartesianMeters(position, headingDeg, forwardM, upM = 0) {
     new Cesium.Cartesian3()
   );
   return Cesium.Cartesian3.add(position, offset, new Cesium.Cartesian3());
-}
-
-/**
- * Build a SampledProperty<Number> for HEADING (degrees) derived purely from
- * consecutive GPS positions.  This is reliable even when the GPS heading
- * column is zero or stale (e.g. 15-minute fix intervals).
- */
-function buildHeadingFromPositions(positions, epoch) {
-  const prop = new Cesium.SampledProperty(Number);
-  prop.setInterpolationOptions({
-    interpolationDegree: 1,
-    interpolationAlgorithm: Cesium.LinearApproximation,
-  });
-  const n = positions.length;
-  let previous = null;
-  for (let i = 0; i < n; i += 4) {
-    const t   = positions[i];
-    const lon = positions[i + 1], lat = positions[i + 2];
-    let bearing;
-    if (i + 4 < n) {
-      bearing = geoBearing(lat, lon, positions[i + 6], positions[i + 5]);
-    } else if (i > 0) {
-      // last point: use reverse of segment from previous to this
-      bearing = geoBearing(positions[i - 2], positions[i - 3], lat, lon);
-    } else {
-      bearing = 0;
-    }
-    bearing = unwrapHeadingDegrees(previous, bearing);
-    previous = bearing;
-    prop.addSample(
-      Cesium.JulianDate.addSeconds(epoch, t, new Cesium.JulianDate()),
-      bearing
-    );
-  }
-  return prop;
-}
-
-/**
- * Build a SampledProperty<Number> for SPEED (m/s) derived from consecutive
- * GPS positions and the time delta between them.  This correctly handles
- * sparse GPS fixes (e.g. 15 minutes apart) where the recorded speed column
- * may be 0 or stale.
- */
-function buildSpeedFromPositions(positions, epoch) {
-  const prop = new Cesium.SampledProperty(Number);
-  prop.setInterpolationOptions({
-    interpolationDegree: 1,
-    interpolationAlgorithm: Cesium.LinearApproximation,
-  });
-  const n = positions.length;
-  for (let i = 0; i < n; i += 4) {
-    const t   = positions[i];
-    const lon = positions[i + 1], lat = positions[i + 2];
-    let speed;
-    if (i + 4 < n) {
-      const dt = positions[i + 4] - t;
-      speed = dt > 0 ? geoDistM(lat, lon, positions[i + 6], positions[i + 5]) / dt : 0;
-    } else if (i > 0) {
-      // last point: copy speed from previous segment
-      const dt = t - positions[i - 4];
-      speed = dt > 0 ? geoDistM(positions[i - 2], positions[i - 3], lat, lon) / dt : 0;
-    } else {
-      speed = 0;
-    }
-    prop.addSample(
-      Cesium.JulianDate.addSeconds(epoch, t, new Cesium.JulianDate()),
-      speed
-    );
-  }
-  return prop;
 }
 
 /* ------------------------------------------------------------------ */
@@ -260,6 +172,56 @@ function buildScalarProp(flat, epoch) {
     prop.addSample(
       Cesium.JulianDate.addSeconds(epoch, flat[i], new Cesium.JulianDate()),
       flat[i+1]
+    );
+  }
+  return prop;
+}
+
+/**
+ * Heading SampledProperty for the eagle model + chase camera.
+ *
+ *  - During IMU bursts → use orientations.yaw (EKF body yaw, course-fused)
+ *  - Outside bursts    → use flightData.headings (GPS-derived course)
+ *
+ * Both are normalised to [0, 360) and unwrapped chronologically so the
+ * SampledProperty's linear interpolation never crosses the 360°/0° seam.
+ */
+function buildHeadingProp(headingsFlat, orientations, intervals, epoch) {
+  const inAnyInterval = (t) => {
+    for (const [s, e] of intervals) {
+      if (t >= s && t <= e) return true;
+      if (s > t) return false;
+    }
+    return false;
+  };
+
+  const samples = [];
+  for (let i = 0; i < headingsFlat.length; i += 2) {
+    const t = headingsFlat[i];
+    const h = headingsFlat[i + 1];
+    if (h == null || !Number.isFinite(h)) continue;
+    if (!inAnyInterval(t)) samples.push({ t, h });
+  }
+  const ot = orientations.times, oy = orientations.yaw;
+  for (let i = 0; i < ot.length; i++) {
+    if (oy[i] == null || !Number.isFinite(oy[i])) continue;
+    samples.push({ t: ot[i], h: oy[i] });
+  }
+  samples.sort((a, b) => a.t - b.t);
+
+  const prop = new Cesium.SampledProperty(Number);
+  prop.setInterpolationOptions({
+    interpolationDegree: 1,
+    interpolationAlgorithm: Cesium.LinearApproximation,
+  });
+  let prev = null;
+  for (const s of samples) {
+    let h = ((s.h % 360) + 360) % 360;
+    h = unwrapHeadingDegrees(prev, h);
+    prev = h;
+    prop.addSample(
+      Cesium.JulianDate.addSeconds(epoch, s.t, new Cesium.JulianDate()),
+      h
     );
   }
   return prop;
@@ -671,15 +633,34 @@ function setupViewToggle() {
 /* ------------------------------------------------------------------ */
 // Variables sharing a unit live in the same color family but get distinct hues
 // so they remain distinguishable when overlaid in one plot window.
+//
+// `dense: true`  → present at every 1 Hz subsample across the whole flight.
+//                  Set `spanGaps: true` so uPlot bridges the null-padding that
+//                  buildUplotData inserts when this is mixed with a sparser
+//                  burst-only series.
+// `dense: false` (default) → only inside IMU bursts. Real between-burst gaps
+//                  are encoded as explicit null entries in getSeriesData.
 const PLOT_SERIES = {
-  // m — blue family (only one for now)
-  altitude:     { label: "altitude (m)",       unit: "m",   color: "#3498db" },
-  // m/s — green family (only one for now)
-  ground_speed: { label: "ground_speed (m/s)", unit: "m/s", color: "#2ecc71" },
-  // deg — warm family, each distinguishable
-  roll:         { label: "roll (deg)",         unit: "deg", color: "#e74c3c" }, // red
-  pitch:        { label: "pitch (deg)",        unit: "deg", color: "#f1c40f" }, // yellow
-  yaw:          { label: "yaw (deg)",          unit: "deg", color: "#e67e22" }, // orange
+  // m — blue family
+  altitude:     { label: "altitude (m)",       unit: "m",     color: "#3498db", dense: true }, // blue
+  // m/s — green family
+  ground_speed: { label: "ground_speed (m/s)", unit: "m/s",   color: "#27ae60", dense: true }, // forest green
+  vx_body:      { label: "vx_body (m/s)",      unit: "m/s",   color: "#2ecc71" }, // emerald
+  vy_body:      { label: "vy_body (m/s)",      unit: "m/s",   color: "#1abc9c" }, // turquoise
+  vz_body:      { label: "vz_body (m/s)",      unit: "m/s",   color: "#16a085" }, // teal
+  // deg — warm family
+  heading:      { label: "heading (deg, GPS)", unit: "deg",   color: "#d35400", dense: true }, // burnt orange
+  roll:         { label: "roll (deg)",         unit: "deg",   color: "#e74c3c" }, // red
+  pitch:        { label: "pitch (deg)",        unit: "deg",   color: "#f1c40f" }, // yellow
+  yaw:          { label: "yaw (deg)",          unit: "deg",   color: "#e67e22" }, // orange
+  // deg/s — purple family
+  omega_x:      { label: "omega_x (deg/s)",    unit: "deg/s", color: "#9b59b6" }, // amethyst
+  omega_y:      { label: "omega_y (deg/s)",    unit: "deg/s", color: "#8e44ad" }, // purple
+  omega_z:      { label: "omega_z (deg/s)",    unit: "deg/s", color: "#c39bd3" }, // light purple
+  // m/s² — cyan family
+  ax_body:      { label: "ax_body (m/s²)",     unit: "m/s²",  color: "#00bcd4" }, // cyan
+  ay_body:      { label: "ay_body (m/s²)",     unit: "m/s²",  color: "#0097a7" }, // dark cyan
+  az_body:      { label: "az_body (m/s²)",     unit: "m/s²",  color: "#4dd0e1" }, // light cyan
 };
 
 const ORIENT_GAP_THRESH = 5;   // sec — bigger gap → break the line
@@ -695,8 +676,8 @@ function getSeriesData(name) {
     const n = (p.length / 4) | 0;
     xs = new Array(n); ys = new Array(n);
     for (let i = 0; i < n; i++) { xs[i] = p[i*4]; ys[i] = p[i*4 + 3]; }
-  } else if (name === "ground_speed") {
-    const arr = flightData.speeds;
+  } else if (name === "ground_speed" || name === "heading") {
+    const arr = name === "ground_speed" ? flightData.speeds : flightData.headings;
     const n = (arr.length / 2) | 0;
     xs = new Array(n); ys = new Array(n);
     for (let i = 0; i < n; i++) { xs[i] = arr[i*2]; ys[i] = arr[i*2 + 1]; }
@@ -736,6 +717,12 @@ function buildUplotData(seriesNames) {
   }
   return out;
 }
+
+// Shared across all plot windows so wheel-zoom on one chart is reflected on
+// every other chart at the same instant. Y-axes remain per-window because
+// each chart can carry series with different units.
+let plotXRange = null;        // current visible time-window width (s)
+let plotXFullExtent = null;   // hard maximum (≈ flight duration); used as cap and as dblclick reset target
 
 const plotResizeObserver = new ResizeObserver((entries) => {
   for (const entry of entries) {
@@ -860,7 +847,7 @@ function rebuildWindowChart(win) {
         label:  PLOT_SERIES[name].label,
         stroke: PLOT_SERIES[name].color,
         width: 1.5,
-        spanGaps: false,
+        spanGaps: !!PLOT_SERIES[name].dense,
         points: { show: false },
       })),
     ],
@@ -870,14 +857,16 @@ function rebuildWindowChart(win) {
           x: { min: u.scales.x.min, max: u.scales.x.max },
           y: { min: u.scales.y.min, max: u.scales.y.max },
         };
-        if (win.xRange == null) {
-          win.xRange = win.initialScales.x.max - win.initialScales.x.min;
-        }
-        // Snap to a view centered on the current playback time.
+        // Initialise the shared x-window once: use the largest data extent
+        // we've seen so we can zoom out across the full flight.
+        const span = win.initialScales.x.max - win.initialScales.x.min;
+        if (plotXFullExtent == null || span > plotXFullExtent) plotXFullExtent = span;
+        if (plotXRange == null) plotXRange = plotXFullExtent;
+        // Snap this window to a view centered on the current playback time.
         if (viewer3D && viewer3D.clock) {
           const e = Cesium.JulianDate.secondsDifference(
             viewer3D.clock.currentTime, viewer3D.clock.startTime);
-          u.setScale("x", { min: e - win.xRange / 2, max: e + win.xRange / 2 });
+          u.setScale("x", { min: e - plotXRange / 2, max: e + plotXRange / 2 });
         }
       }],
     },
@@ -945,22 +934,10 @@ function attachZoomHandlers(win) {
         x: { min: u.scales.x.min, max: u.scales.x.max },
         y: { min: u.scales.y.min, max: u.scales.y.max },
       };
-      if (win.xRange == null) win.xRange = win.initialScales.x.max - win.initialScales.x.min;
+      const span = win.initialScales.x.max - win.initialScales.x.min;
+      if (plotXFullExtent == null || span > plotXFullExtent) plotXFullExtent = span;
+      if (plotXRange == null) plotXRange = plotXFullExtent;
     }
-  }
-
-  function getElapsed() {
-    if (!viewer3D || !viewer3D.clock) return 0;
-    return Cesium.JulianDate.secondsDifference(
-      viewer3D.clock.currentTime, viewer3D.clock.startTime);
-  }
-
-  /** Apply the current xRange centered on `elapsed`. */
-  function applyXWindow() {
-    if (win.xRange == null) return;
-    const e = getElapsed();
-    u.setScale("x", { min: e - win.xRange / 2, max: e + win.xRange / 2 });
-    placeCursorCenter(win);
   }
 
   /** Y-axis zoom anchored at a data-y value. Clamped to the y data extent. */
@@ -982,20 +959,6 @@ function attachZoomHandlers(win) {
     if (newMin < newMax) u.setScale("y", { min: newMin, max: newMax });
   }
 
-  /** X-window zoom: scale the visible time window, keeping it centered on `elapsed`. */
-  function zoomXWindow(factor) {
-    if (win.xRange == null) return;
-    const init = win.initialScales && win.initialScales.x;
-    let newRange = win.xRange * factor;
-    if (init && init.min != null) {
-      const fullRange = init.max - init.min;
-      if (newRange > fullRange) newRange = fullRange;
-    }
-    if (newRange < 0.1) newRange = 0.1;   // ~100 ms minimum window
-    win.xRange = newRange;
-    applyXWindow();
-  }
-
   function anchorYVal(e) {
     const r = overEl.getBoundingClientRect();
     return u.posToVal(e.clientY - r.top, "y");
@@ -1006,13 +969,13 @@ function attachZoomHandlers(win) {
   overEl.addEventListener("wheel", (e) => {
     e.preventDefault();
     const factor = Math.exp(e.deltaY * ZOOM_K);
-    zoomXWindow(factor);
+    zoomXWindowAll(factor);
     zoomY(factor, anchorYVal(e));
   }, { passive: false });
 
   if (xAxisEl) xAxisEl.addEventListener("wheel", (e) => {
     e.preventDefault();
-    zoomXWindow(Math.exp(e.deltaY * ZOOM_K));
+    zoomXWindowAll(Math.exp(e.deltaY * ZOOM_K));
   }, { passive: false });
 
   if (yAxisEl) yAxisEl.addEventListener("wheel", (e) => {
@@ -1021,12 +984,39 @@ function attachZoomHandlers(win) {
   }, { passive: false });
 
   overEl.addEventListener("dblclick", () => {
+    // X reset is global (affects all charts); Y reset is per-window.
+    if (plotXFullExtent != null) {
+      plotXRange = plotXFullExtent;
+      applyXRangeToAll();
+    }
     const init = win.initialScales;
-    if (!init || init.x.min == null || init.y.min == null) return;
-    win.xRange = init.x.max - init.x.min;
-    applyXWindow();
-    u.setScale("y", init.y);
+    if (init && init.y.min != null) u.setScale("y", init.y);
   });
+}
+
+/**
+ * Update the shared time-window width and replay it onto every plot so
+ * zooming on any chart's wheel/axis is reflected on every other chart.
+ */
+function zoomXWindowAll(factor) {
+  if (plotXRange == null) return;
+  let newRange = plotXRange * factor;
+  if (plotXFullExtent != null && newRange > plotXFullExtent) newRange = plotXFullExtent;
+  if (newRange < 0.1) newRange = 0.1;
+  plotXRange = newRange;
+  applyXRangeToAll();
+}
+
+function applyXRangeToAll() {
+  if (plotXRange == null || !viewer3D || !viewer3D.clock) return;
+  const e = Cesium.JulianDate.secondsDifference(
+    viewer3D.clock.currentTime, viewer3D.clock.startTime);
+  const half = plotXRange / 2;
+  for (const w of plotWindows) {
+    if (!w.uplot) continue;
+    w.uplot.setScale("x", { min: e - half, max: e + half });
+    placeCursorCenter(w);
+  }
 }
 
 /**
@@ -1048,15 +1038,19 @@ function placeCursorCenter(w) {
  * sits at the cursor (center), then re-center the cursor itself.
  */
 function updatePlotCursors(elapsedSec) {
+  if (plotXRange == null) {
+    for (const w of plotWindows) if (w.cursor) w.cursor.style.display = "none";
+    return;
+  }
+  const half = plotXRange / 2;
+  const newMin = elapsedSec - half;
+  const newMax = elapsedSec + half;
   for (const w of plotWindows) {
-    if (!w.uplot || w.xRange == null) {
+    if (!w.uplot) {
       if (w.cursor) w.cursor.style.display = "none";
       continue;
     }
-    const half = w.xRange / 2;
     const sc = w.uplot.scales.x;
-    const newMin = elapsedSec - half;
-    const newMax = elapsedSec + half;
     if (sc.min !== newMin || sc.max !== newMax) {
       w.uplot.setScale("x", { min: newMin, max: newMax });
     }
@@ -1180,8 +1174,17 @@ async function startApp() {
   positionProp   = buildPositionProp(flightData.positions, epochJulian);
   // Heading and speed computed from consecutive GPS positions — more reliable
   // than the CSV columns, which can be stale or zero during sparse GPS fixes.
-  headingSampled = buildHeadingFromPositions(flightData.positions, epochJulian);
-  speedSampled   = buildSpeedFromPositions(flightData.positions, epochJulian);
+  // Heading: EKF-fused IMU yaw (course-corrected) during bursts, GPS-derived
+  // course outside bursts.
+  headingSampled = buildHeadingProp(
+    flightData.headings,
+    flightData.orientations,
+    flightData.orientation_intervals,
+    epochJulian
+  );
+  // Speed: straight from the merged CSV's ground_speed column (EKF-fused
+  // during bursts; GPS column otherwise).
+  speedSampled = buildScalarProp(flightData.speeds, epochJulian);
 
   setStatus("Precomputing orientation quaternions (this takes a few seconds)…");
   /* Yield to browser so "Building…" message renders before the heavy loop */
